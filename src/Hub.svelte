@@ -322,7 +322,6 @@
   }
 
   async function handleHotkey() {
-    if (settings.hotkeyAction === 'hub') { await backend.toggleHubWindow(); return }
     if (settings.hotkeyAction === 'new-note') { await createNote(); return }
     await refresh()
     const id = workspace.activeNoteId ?? activeNotes.find((note) => !note.archived)?.id

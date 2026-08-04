@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS } from './types'
+import { DEFAULT_SETTINGS, normalizeHotkeyAction } from './types'
 
 describe('DEFAULT_SETTINGS', () => {
-  it('opens the core hub from the global shortcut by default', () => {
-    expect(DEFAULT_SETTINGS.hotkeyAction).toBe('hub')
+  it('opens the last note from the global shortcut by default', () => {
+    expect(DEFAULT_SETTINGS.hotkeyAction).toBe('last-note')
+  })
+
+  it('migrates the legacy hub shortcut without reopening the hub', () => {
+    expect(normalizeHotkeyAction('hub')).toBe('last-note')
+    expect(normalizeHotkeyAction(undefined)).toBe('last-note')
+    expect(normalizeHotkeyAction('new-note')).toBe('new-note')
   })
 
   it('keeps local-first defaults', () => {

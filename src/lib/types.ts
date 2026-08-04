@@ -2,7 +2,7 @@ export type Theme = 'system' | 'light' | 'dark'
 export type SaveState = 'saved' | 'saving' | 'dirty' | 'error'
 export type WindowLayout = 'integrated' | 'separate'
 export type HotkeyWindowScope = 'editor' | 'both'
-export type HotkeyAction = 'hub' | 'last-note' | 'new-note'
+export type HotkeyAction = 'last-note' | 'new-note'
 
 export interface Tag {
   id: string
@@ -74,6 +74,10 @@ export interface SaveNoteInput {
   tags: string[]
 }
 
+export function normalizeHotkeyAction(value: unknown): HotkeyAction {
+  return value === 'new-note' ? 'new-note' : 'last-note'
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
   hotkey: 'Ctrl+Alt+N',
   startOnBoot: false,
@@ -84,7 +88,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   alwaysOnTop: false,
   windowLayout: 'integrated',
   hotkeyWindowScope: 'editor',
-  hotkeyAction: 'hub',
+  hotkeyAction: 'last-note',
 }
 
 export const EMPTY_DOCUMENT: Record<string, unknown> = {

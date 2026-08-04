@@ -65,7 +65,7 @@
     <div class="settings-body">
       <label class="setting-row">
         <span class="setting-icon"><Keyboard /></span>
-        <span class="setting-copy"><strong>全局快捷键</strong><small>随时唤起轻笺，默认打开核心工作台</small></span>
+        <span class="setting-copy"><strong>全局快捷键</strong><small>随时直接唤起便签编辑页，不打开首页</small></span>
         <button
           class="hotkey-capture"
           class:capturing
@@ -75,9 +75,8 @@
 
       <label class="setting-row">
         <span class="setting-icon"><MousePointerClick /></span>
-        <span class="setting-copy"><strong>快捷键动作</strong><small>选择按下全局快捷键时首先打开什么</small></span>
+        <span class="setting-copy"><strong>快捷键动作</strong><small>选择恢复上次便签，或者直接新建便签</small></span>
         <select bind:value={draft.hotkeyAction}>
-          <option value="hub">核心工作台</option>
           <option value="last-note">上次便签</option>
           <option value="new-note">新建便签</option>
         </select>

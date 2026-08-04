@@ -8,7 +8,7 @@ import type {
   SaveNoteInput,
   WorkspaceState,
 } from './types'
-import { DEFAULT_SETTINGS, EMPTY_DOCUMENT } from './types'
+import { DEFAULT_SETTINGS, EMPTY_DOCUMENT, normalizeHotkeyAction } from './types'
 
 const inTauri = '__TAURI_INTERNALS__' in window
 const MOCK_NOTES_KEY = 'qingjian.mock.notes'
@@ -232,7 +232,13 @@ export const backend = {
   async getSettings(): Promise<AppSettings> {
     if (inTauri) return invoke('get_settings')
     const value = localStorage.getItem(MOCK_SETTINGS_KEY)
-    return value ? { ...DEFAULT_SETTINGS, ...JSON.parse(value) } : DEFAULT_SETTINGS
+    if (!value) return DEFAULT_SETTINGS
+    const stored = JSON.parse(value)
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      hotkeyAction: normalizeHotkeyAction(stored.hotkeyAction),
+    }
   },
 
   async saveSettings(settings: AppSettings): Promise<AppSettings> {

@@ -633,7 +633,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, AppError>
                 }
                 (base, _) => base,
             };
-            Ok(serde_json::from_value(merged)?)
+            Ok(serde_json::from_value::<AppSettings>(merged)?.migrate_legacy())
         }
         None => Ok(AppSettings::default()),
     }
@@ -656,7 +656,7 @@ pub fn save_settings(
     if !matches!(settings.hotkey_window_scope.as_str(), "editor" | "both") {
         return Err(AppError::Invalid("快捷键唤起范围无效".into()));
     }
-    if !matches!(settings.hotkey_action.as_str(), "hub" | "last-note" | "new-note") {
+    if !matches!(settings.hotkey_action.as_str(), "last-note" | "new-note") {
         return Err(AppError::Invalid("快捷键动作无效".into()));
     }
     let db = lock_db(&state)?;

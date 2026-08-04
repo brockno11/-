@@ -1,13 +1,13 @@
 # 轻笺
 
-轻笺是一款面向 Windows 10/11 的纯本地富文本便签。当前版本为 **0.4.0**，包含便签工作台、独立编辑器、多选管理、归档与回收站、文件夹和标签、全文搜索，以及轻量黑色窗口阴影。
+轻笺是一款面向 Windows 10/11 的纯本地富文本便签。当前版本为 **0.4.1**，包含便签工作台、独立编辑器、多选管理、归档与回收站、文件夹和标签、全文搜索，以及轻量黑色窗口阴影。
 
 ## 下载与运行
 
-最新 Windows 构建位于 [`release/0.4.0`](release/0.4.0)：
+最新 Windows 构建位于 [`release/0.4.1`](release/0.4.1)：
 
-- `轻笺_0.4.0_x64-setup.exe`：Windows x64 安装包
-- `qingjian-0.4.0-light-shadow-portable.zip`：便携包
+- `轻笺_0.4.1_x64-setup.exe`：Windows x64 安装包
+- `qingjian-0.4.1-portable.zip`：便携包
 - `qingjian.exe`：主程序
 - `SHA256SUMS.txt`：文件完整性校验值
 
@@ -24,7 +24,7 @@
 
 ## 快捷键
 
-- `Ctrl+Alt+N`：显示或隐藏工作台
+- `Ctrl+Alt+N`：直接打开上次使用的便签；没有可用便签时自动新建
 - `Ctrl+N`：新建便签
 - `Ctrl+S`：立即保存
 - `Ctrl+Tab` / `Ctrl+Shift+Tab`：切换编辑器标签

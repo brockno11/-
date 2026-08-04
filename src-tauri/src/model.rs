@@ -83,8 +83,34 @@ impl Default for AppSettings {
             always_on_top: false,
             window_layout: "integrated".into(),
             hotkey_window_scope: "editor".into(),
-            hotkey_action: "hub".into(),
+            hotkey_action: "last-note".into(),
         }
+    }
+}
+
+impl AppSettings {
+    pub fn migrate_legacy(mut self) -> Self {
+        if self.hotkey_action == "hub" {
+            self.hotkey_action = "last-note".into();
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppSettings;
+
+    #[test]
+    fn hotkey_defaults_to_the_last_note() {
+        assert_eq!(AppSettings::default().hotkey_action, "last-note");
+    }
+
+    #[test]
+    fn legacy_hub_hotkey_is_migrated() {
+        let mut settings = AppSettings::default();
+        settings.hotkey_action = "hub".into();
+        assert_eq!(settings.migrate_legacy().hotkey_action, "last-note");
     }
 }
 
