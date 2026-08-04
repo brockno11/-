@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "轻笺",
+  "version": "0.4.0",
+  "identifier": "com.qingjian.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist",
+    "removeUnusedCommands": true
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "hub",
+        "title": "轻笺工作台",
+        "width": 404,
+        "height": 704,
+        "minWidth": 344,
+        "minHeight": 504,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "backgroundColor": "#00000000",
+        "resizable": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu --disable-gpu-compositing --disable-crash-reporter --disable-background-networking --disable-component-update --disable-default-apps --disable-sync --no-first-run --renderer-process-limit=1"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPLOCALDATA/assets/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Productivity",
+    "shortDescription": "快捷、轻量、纯本地的富文本便签",
+    "longDescription": "轻笺是一款支持图片、表格、字体与全局快捷键的纯本地 Windows 便签。",
+    "copyright": "Copyright © 2026 QingJian",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false,
+        "installMode": "currentUser"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
+  }
+}
