@@ -419,23 +419,24 @@ main.navigator-window .sidebar { width: 100%; }
 .note-prosemirror ul[data-type="taskList"] ul[data-type="taskList"] {
   margin: 4px 0 2px;
 }
-.note-prosemirror li[data-type="taskItem"] {
+.note-prosemirror li[data-checked] {
   display: flex;
   gap: 9px;
   align-items: flex-start;
   margin: 5px 0;
 }
-.note-prosemirror li[data-type="taskItem"] > label {
+.note-prosemirror li[data-checked] > label {
   position: relative;
   flex: 0 0 auto;
   width: 18px;
   height: 18px;
-  margin-top: 3px;
+  margin-top: calc((1.7em - 18px) / 2);
   cursor: pointer;
   user-select: none;
 }
-.note-prosemirror li[data-type="taskItem"] > label > input[type="checkbox"] {
+.note-prosemirror li[data-checked] > label > input[type="checkbox"] {
   appearance: none;
+  display: block;
   position: relative;
   width: 18px;
   height: 18px;
@@ -446,22 +447,22 @@ main.navigator-window .sidebar { width: 100%; }
   cursor: pointer;
   transition: border-color .14s, background .14s, box-shadow .14s, transform .14s;
 }
-.note-prosemirror li[data-type="taskItem"] > label:hover > input[type="checkbox"] {
+.note-prosemirror li[data-checked] > label:hover > input[type="checkbox"] {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent), transparent 84%);
 }
-.note-prosemirror li[data-type="taskItem"] > label > input[type="checkbox"]:active {
+.note-prosemirror li[data-checked] > label > input[type="checkbox"]:active {
   transform: scale(.9);
 }
-.note-prosemirror li[data-type="taskItem"] > label > input[type="checkbox"]:focus-visible {
+.note-prosemirror li[data-checked] > label > input[type="checkbox"]:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent), transparent 35%);
   outline-offset: 2px;
 }
-.note-prosemirror li[data-type="taskItem"] > label > input[type="checkbox"]:checked {
+.note-prosemirror li[data-checked] > label > input[type="checkbox"]:checked {
   border-color: var(--accent);
   background: var(--accent);
 }
-.note-prosemirror li[data-type="taskItem"] > label > input[type="checkbox"]:checked::after {
+.note-prosemirror li[data-checked] > label > input[type="checkbox"]:checked::after {
   content: "";
   position: absolute;
   left: 5px;
@@ -472,10 +473,15 @@ main.navigator-window .sidebar { width: 100%; }
   border-width: 0 1.7px 1.7px 0;
   transform: rotate(45deg);
 }
-.note-prosemirror li[data-type="taskItem"] > label > span { display: none; }
-.note-prosemirror li[data-type="taskItem"] > div { flex: 1; min-width: 0; }
-.note-prosemirror li[data-type="taskItem"][data-checked="true"] > div > p:first-child {
+.note-prosemirror li[data-checked] > label > span { display: none; }
+.note-prosemirror li[data-checked] > div { flex: 1; min-width: 0; }
+.note-prosemirror li[data-checked] > div > p:first-child {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+.note-prosemirror li[data-checked="true"] > div > p:first-child {
   color: var(--muted);
+  opacity: .48;
   text-decoration: line-through;
   text-decoration-thickness: 1px;
   text-decoration-color: color-mix(in srgb, var(--muted), transparent 20%);

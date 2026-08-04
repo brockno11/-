@@ -1,6 +1,6 @@
 [package]
 name = "qingjian"
-version = "0.4.2"
+version = "0.4.3"
 description = "轻量、纯本地的 Windows 富文本便签"
 authors = ["QingJian"]
 edition = "2021"
