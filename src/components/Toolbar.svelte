@@ -2,7 +2,7 @@
   import type { Editor } from '@tiptap/core'
   import { NodeSelection } from '@tiptap/pm/state'
   import {
-    Bold, Italic, Underline, Strikethrough, List, ListOrdered, CheckSquare,
+    Bold, Italic, Underline, Strikethrough, List, ListOrdered, CircleCheckBig,
     AlignLeft, AlignCenter, AlignRight, ImagePlus, Table2, Rows3, Columns3,
     Trash2, Minus, Plus, Image as ImageIcon, RotateCcw, WrapText,
   } from 'lucide-svelte'
@@ -188,7 +188,7 @@
     <span class="toolbar-divider"></span>
     <button class:active={editor?.isActive('bulletList')} aria-label="项目符号" use:tooltip={'项目符号'} on:click={() => command(() => editor?.chain().focus().toggleBulletList().run())}><List /></button>
     <button class:active={editor?.isActive('orderedList')} aria-label="编号列表" use:tooltip={'编号列表'} on:click={() => command(() => editor?.chain().focus().toggleOrderedList().run())}><ListOrdered /></button>
-    <button class:active={editor?.isActive('taskList')} aria-label="待办清单" use:tooltip={'待办清单'} on:click={() => command(() => editor?.chain().focus().toggleTaskList().run())}><CheckSquare /></button>
+    <button class:active={editor?.isActive('taskList')} aria-label="圆圈待办" use:tooltip={'圆圈待办 · 点击圆圈即可完成'} on:click={() => command(() => editor?.chain().focus().toggleTaskList().run())}><CircleCheckBig /></button>
 
     <span class="toolbar-divider"></span>
     <button class:active={editor?.isActive({ textAlign: 'left' })} aria-label="左对齐" use:tooltip={'左对齐'} on:click={() => command(() => editor?.chain().focus().setTextAlign('left').run())}><AlignLeft /></button>
