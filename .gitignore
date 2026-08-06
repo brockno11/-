@@ -7,4 +7,6 @@ coverage/
 *.log
 *.pdb
 *.ilk
+*.key
+*.key.pub
 .DS_Store

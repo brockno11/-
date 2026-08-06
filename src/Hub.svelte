@@ -11,10 +11,15 @@
     Trash2, Undo2, X,
   } from 'lucide-svelte'
   import SettingsModal from './components/SettingsModal.svelte'
+  import UpdateModal from './components/UpdateModal.svelte'
   import { backend } from './lib/backend'
   import { tooltip } from './lib/tooltip'
   import { DEFAULT_SETTINGS } from './lib/types'
-  import type { AppSettings, Folder, NoteSummary, Tag, WorkspaceState } from './lib/types'
+  import type { AppSettings, Folder, NoteSummary, NoteWindowMode, Tag, WorkspaceState } from './lib/types'
+  import {
+    checkForAppUpdate, downloadAndInstallAppUpdate, getCurrentAppVersion,
+    type AppUpdateInfo, type UpdateDownloadProgress,
+  } from './lib/updater'
 
   type HubView = 'notes' | 'pinned' | 'archived' | 'trash'
   type ContextMenu = { note: NoteSummary; x: number; y: number } | null
@@ -35,12 +40,21 @@
   let contextMenu: ContextMenu = null
   let searchInput: HTMLInputElement
   let registeredHotkey = ''
+  let visibleDesktopNotes = new Set<string>()
   let toast = ''
   let creatingFolder = false
   let editingFolderId = ''
   let folderDraft = ''
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let quitFallback: ReturnType<typeof setTimeout> | undefined
+  let pendingQuitIds = new Set<string>()
+  let appVersion = '0.5.0'
+  let checkingUpdate = false
+  let availableUpdate: AppUpdateInfo | null = null
+  let installingUpdate = false
+  let updateError = ''
+  let updateProgress: UpdateDownloadProgress = { downloadedBytes: 0, finished: false }
+  let startupUpdateTimer: ReturnType<typeof setTimeout> | undefined
   const compactPreview = !backend.isDesktop
     && new URLSearchParams(window.location.search).get('preview') === 'compact'
 
@@ -134,11 +148,16 @@
   }
 
   async function refresh() {
-    ;[notes, folders, workspace] = await Promise.all([
+    const [nextNotes, nextFolders, nextWorkspace, visibleWindows] = await Promise.all([
       backend.listNotes('', true, true),
       backend.listFolders(),
       backend.getWorkspaceState(),
+      backend.listVisibleNoteWindows(),
     ])
+    notes = nextNotes
+    folders = nextFolders
+    workspace = nextWorkspace
+    visibleDesktopNotes = new Set(visibleWindows.map((state) => state.noteId))
   }
 
   function startWindowDrag(event: MouseEvent) {
@@ -148,7 +167,7 @@
     void getCurrentWindow().startDragging()
   }
 
-  async function openNote(id: string) {
+  async function openNote(id: string, preferredMode?: NoteWindowMode) {
     const note = notes.find((item) => item.id === id)
     if (!note || note.trashedAt) return
     workspace = {
@@ -157,7 +176,8 @@
       activeNoteId: id,
     }
     await backend.saveWorkspaceState(workspace)
-    await backend.openNoteInEditor(id, settings.alwaysOnTop)
+    await backend.openNoteWindow(id, preferredMode)
+    visibleDesktopNotes = new Set(visibleDesktopNotes).add(id)
   }
 
   async function createNote() {
@@ -165,7 +185,7 @@
     const note = await backend.createNote(folderId)
     await refresh()
     await emitDesktop('qingjian://notes-changed')
-    await openNote(note.id)
+    await openNote(note.id, 'card')
   }
 
   function selectView(next: HubView) {
@@ -356,8 +376,66 @@
       else await disable()
     }
     settings = await backend.saveSettings(next)
-    await getCurrentWindow().setAlwaysOnTop(settings.alwaysOnTop)
     await emitDesktop('qingjian://settings-changed', settings)
+  }
+
+  async function runUpdateCheck(manual: boolean) {
+    if (checkingUpdate) return
+    if (!backend.isDesktop) {
+      if (manual) showToast('浏览器预览模式不支持检查更新')
+      return
+    }
+    checkingUpdate = true
+    updateError = ''
+    try {
+      const update = await checkForAppUpdate()
+      if (!update) {
+        if (manual) showToast(`已是最新版本 ${appVersion}`)
+        return
+      }
+      availableUpdate = update
+      settingsOpen = false
+      await getCurrentWindow().show()
+      await getCurrentWindow().setFocus()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (manual) showToast(`检查更新失败：${message}`)
+      else console.warn('自动检查更新失败', error)
+    } finally {
+      checkingUpdate = false
+    }
+  }
+
+  async function flushNotesForUpdate() {
+    const visible = await backend.listVisibleNoteWindows()
+    const pending = new Set(visible.map((state) => state.noteId))
+    if (!pending.size) return
+    let resolveReady: () => void = () => {}
+    const ready = new Promise<void>((resolve) => { resolveReady = resolve })
+    const unlisten = await listen<string>('qingjian://note-update-save-ready', (event) => {
+      pending.delete(event.payload)
+      if (!pending.size) resolveReady()
+    })
+    await emitDesktop('qingjian://flush-for-update')
+    await Promise.race([
+      ready,
+      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+    ])
+    unlisten()
+  }
+
+  async function installAvailableUpdate() {
+    if (!availableUpdate || installingUpdate) return
+    installingUpdate = true
+    updateError = ''
+    updateProgress = { downloadedBytes: 0, finished: false }
+    try {
+      await flushNotesForUpdate()
+      await downloadAndInstallAppUpdate((progress) => (updateProgress = progress))
+    } catch (error) {
+      updateError = error instanceof Error ? error.message : String(error)
+      installingUpdate = false
+    }
   }
 
   async function exportBackup() {
@@ -408,27 +486,42 @@
     void (async () => {
       try {
         settings = await backend.getSettings()
+        appVersion = await getCurrentAppVersion()
         await refresh()
         if (!backend.isDesktop || disposed) return
         await registerHotkey(settings.hotkey)
-        await getCurrentWindow().setAlwaysOnTop(settings.alwaysOnTop)
+        await register('Ctrl+Alt+L', (event) => {
+          if (event.state === 'Pressed') void backend.unlockAllNoteWindows()
+        })
         cleanups.push(await getCurrentWindow().onCloseRequested((event) => {
           event.preventDefault(); void getCurrentWindow().hide()
         }))
         cleanups.push(...await Promise.all([
           listen('qingjian://notes-changed', () => void refresh()),
+          listen('qingjian://note-windows-changed', () => void refresh()),
           listen<WorkspaceState>('qingjian://workspace-changed', (event) => (workspace = event.payload)),
           listen('qingjian://new-note', () => void createNote()),
           listen('qingjian://settings', () => (settingsOpen = true)),
+          listen('qingjian://check-update', () => void runUpdateCheck(true)),
           listen('qingjian://quit-requested', () => {
-            void emitDesktop('qingjian://flush-and-quit')
-            clearTimeout(quitFallback)
-            quitFallback = setTimeout(() => void backend.quit(), 2000)
+            void (async () => {
+              const visible = await backend.listVisibleNoteWindows()
+              pendingQuitIds = new Set(visible.map((state) => state.noteId))
+              await emitDesktop('qingjian://flush-and-quit')
+              if (!pendingQuitIds.size) { await backend.quit(); return }
+              clearTimeout(quitFallback)
+              quitFallback = setTimeout(() => void backend.quit(), 2000)
+            })()
           }),
-          listen('qingjian://ready-to-quit', () => {
-            clearTimeout(quitFallback); void backend.quit()
+          listen<string>('qingjian://note-save-ready', (event) => {
+            pendingQuitIds.delete(event.payload)
+            pendingQuitIds = new Set(pendingQuitIds)
+            if (!pendingQuitIds.size) { clearTimeout(quitFallback); void backend.quit() }
           }),
         ]))
+        if (settings.checkUpdatesOnStartup) {
+          startupUpdateTimer = setTimeout(() => void runUpdateCheck(false), 1800)
+        }
       } catch (error) {
         showToast(error instanceof Error ? error.message : '首页初始化失败')
       } finally { loading = false }
@@ -437,7 +530,9 @@
       disposed = true
       cleanups.forEach((cleanup) => cleanup())
       if (registeredHotkey) void unregister(registeredHotkey)
+      if (backend.isDesktop) void unregister('Ctrl+Alt+L')
       clearTimeout(quitFallback)
+      clearTimeout(startupUpdateTimer)
     }
   })
 </script>
@@ -508,6 +603,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="hub-note-card redesign-card"
+          data-note-id={note.id}
           class:active={!selectionMode && workspace.activeNoteId === note.id}
           class:selected={selectedIds.has(note.id)}
           role="button"
@@ -527,6 +623,7 @@
           <div class="redesign-card-body">
             <div class="hub-note-title">
               <strong>{note.title || '新便签'}</strong>
+              {#if visibleDesktopNotes.has(note.id)}<span class="desktop-visible-badge">桌面已显示</span>{/if}
               {#if note.pinned && !note.trashedAt}<Pin />{/if}
               <time>{formatNoteDate(note.trashedAt || note.updatedAt)}</time>
             </div>
@@ -599,6 +696,10 @@
         <span></span>
         <button class="danger" on:click={() => void permanentlyDeleteMany([contextMenu!.note.id])}><Trash2 />永久删除</button>
       {:else}
+        <button on:click={() => { const id = contextMenu!.note.id; contextMenu = null; void openNote(id, 'capsule') }}>胶囊形态打开</button>
+        <button on:click={() => { const id = contextMenu!.note.id; contextMenu = null; void openNote(id, 'card') }}>卡片形态打开</button>
+        <button on:click={() => { const id = contextMenu!.note.id; contextMenu = null; void openNote(id, 'editor') }}>编辑形态打开</button>
+        <span></span>
         <button on:click={() => void togglePin(contextMenu!.note)}>{#if contextMenu.note.pinned}<PinOff />取消置顶{:else}<Pin />置顶便签{/if}</button>
         <button on:click={() => void archiveMany([contextMenu!.note.id], !contextMenu!.note.archived)}>{#if contextMenu.note.archived}<ArchiveRestore />移回全部便签{:else}<Archive />归档便签{/if}</button>
         <button on:click={() => { toggleSelection(contextMenu!.note.id); contextMenu = null }}><Check />选择便签</button>
@@ -627,7 +728,34 @@
 
 {#if settingsOpen}
   <div class={`modal-theme ${themeClass}`}>
-    <SettingsModal {settings} onSave={saveAppSettings} onClose={() => (settingsOpen = false)} onBackup={() => void exportBackup()} onRestore={() => void restoreBackup()} />
+    <SettingsModal
+      {settings}
+      {appVersion}
+      {checkingUpdate}
+      onSave={saveAppSettings}
+      onClose={() => (settingsOpen = false)}
+      onBackup={() => void exportBackup()}
+      onRestore={() => void restoreBackup()}
+      onCheckUpdate={() => void runUpdateCheck(true)}
+    />
+  </div>
+{/if}
+
+{#if availableUpdate}
+  <div class={`modal-theme ${themeClass}`}>
+    <UpdateModal
+      update={availableUpdate}
+      installing={installingUpdate}
+      progress={updateProgress}
+      error={updateError}
+      onInstall={() => void installAvailableUpdate()}
+      onLater={() => {
+        if (!installingUpdate) {
+          availableUpdate = null
+          updateError = ''
+        }
+      }}
+    />
   </div>
 {/if}
 

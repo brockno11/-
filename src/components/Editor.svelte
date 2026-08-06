@@ -15,7 +15,7 @@
   import { TableKit } from '@tiptap/extension-table'
   import DOMPurify from 'dompurify'
   import {
-    AttachmentImage, fileToDataUrl, normalizeImageLayout, type ImageLayout,
+    AttachmentImage, fileToDataUrl, MarkdownTaskShortcut, normalizeImageLayout, type ImageLayout,
   } from '../lib/editor'
   import { MixedContentSelection } from '../lib/mixed-selection'
   import { pastePlainTextGrid, shouldUsePlainTextGrid } from '../lib/table-paste'
@@ -227,6 +227,7 @@
         TextAlign.configure({ types: ['heading', 'paragraph'] }),
         TaskList,
         TaskItem.configure({ nested: true }),
+        MarkdownTaskShortcut,
         TableKit.configure({
           table: {
             resizable: true,
@@ -240,7 +241,7 @@
         }),
         MixedContentSelection,
         Placeholder.configure({
-          placeholder: '从这里开始记录工作进度…',
+          placeholder: '开始记录… 输入 #、-、[ ] 或 ``` 后按空格快速排版',
         }),
       ],
       editorProps: {

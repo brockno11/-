@@ -15,5 +15,6 @@ describe('DEFAULT_SETTINGS', () => {
   it('keeps local-first defaults', () => {
     expect(DEFAULT_SETTINGS.startOnBoot).toBe(false)
     expect(DEFAULT_SETTINGS.theme).toBe('system')
+    expect(DEFAULT_SETTINGS.checkUpdatesOnStartup).toBe(true)
   })
 })

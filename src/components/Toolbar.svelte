@@ -26,6 +26,14 @@
   $: currentSize = version >= 0
     ? Number.parseInt(editor?.getAttributes('textStyle').fontSize || '16', 10)
     : 16
+  $: blockStyle = version >= 0
+    ? editor?.isActive('heading', { level: 1 }) ? 'h1'
+      : editor?.isActive('heading', { level: 2 }) ? 'h2'
+        : editor?.isActive('heading', { level: 3 }) ? 'h3'
+          : editor?.isActive('blockquote') ? 'blockquote'
+            : editor?.isActive('codeBlock') ? 'codeBlock'
+              : 'paragraph'
+    : 'paragraph'
   $: inTable = version >= 0 && (editor?.isActive('table') ?? false)
   $: imageSelected = version >= 0 && editor?.state.selection instanceof NodeSelection
     && editor.state.selection.node.type.name === 'image'
@@ -64,6 +72,25 @@
     let chain = editor.chain().focus()
     if (rememberedSelection) chain = chain.setTextSelection(rememberedSelection)
     chain.setFontSize(`${size}px`).run()
+    rememberedSelection = null
+  }
+
+  function applyBlockStyle(style: string) {
+    if (!editor) return
+    let chain = editor.chain().focus()
+    if (rememberedSelection) chain = chain.setTextSelection(rememberedSelection)
+    const inBlockquote = editor.isActive('blockquote')
+    const inCodeBlock = editor.isActive('codeBlock')
+    if (inBlockquote && style !== 'blockquote') chain = chain.toggleBlockquote()
+    if (inCodeBlock && style !== 'codeBlock') chain = chain.setParagraph()
+
+    if (style === 'h1') chain.setHeading({ level: 1 })
+    else if (style === 'h2') chain.setHeading({ level: 2 })
+    else if (style === 'h3') chain.setHeading({ level: 3 })
+    else if (style === 'blockquote' && !inBlockquote) chain.toggleBlockquote()
+    else if (style === 'codeBlock' && !inCodeBlock) chain.toggleCodeBlock()
+    else if (style === 'paragraph') chain.setParagraph()
+    chain.run()
     rememberedSelection = null
   }
 
@@ -154,6 +181,22 @@
       <button class="layout-button wrap-button" class:active={imageLayout === 'wrap-right'} aria-label="图片靠右，文字在左侧环绕" use:tooltip={'图片靠右，文字在左侧环绕'} on:click={() => setImageLayout('wrap-right')}><WrapText />图右文左</button>
     </div>
   {:else}
+    <select
+      class="block-select"
+      aria-label="段落样式，支持 Markdown 快捷输入"
+      title="Markdown：输入 #、>、-、1.、[ ] 或 ``` 后按空格"
+      value={blockStyle}
+      on:mousedown={rememberTextSelection}
+      on:change={(event) => applyBlockStyle(event.currentTarget.value)}
+    >
+      <option value="paragraph">正文</option>
+      <option value="h1">一级标题　#</option>
+      <option value="h2">二级标题　##</option>
+      <option value="h3">三级标题　###</option>
+      <option value="blockquote">引用　&gt;</option>
+      <option value="codeBlock">代码块　```</option>
+    </select>
+
     <select
       class="font-select"
       aria-label="字体"

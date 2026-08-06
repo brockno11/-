@@ -5,6 +5,8 @@ import type {
   Folder,
   Note,
   NoteSummary,
+  NoteWindowMode,
+  NoteWindowState,
   SaveNoteInput,
   WorkspaceState,
 } from './types'
@@ -237,6 +239,8 @@ export const backend = {
     return {
       ...DEFAULT_SETTINGS,
       ...stored,
+      defaultNoteAlwaysOnTop: stored.defaultNoteAlwaysOnTop ?? stored.alwaysOnTop ?? false,
+      defaultNoteOpacity: Math.max(60, Math.min(100, stored.defaultNoteOpacity ?? 100)),
       hotkeyAction: normalizeHotkeyAction(stored.hotkeyAction),
     }
   },
@@ -247,12 +251,85 @@ export const backend = {
     return settings
   },
 
-  async openNoteInEditor(noteId: string, alwaysOnTop = false): Promise<void> {
-    if (inTauri) await invoke('open_note_in_editor', { noteId, alwaysOnTop })
+  async openNoteWindow(noteId: string, preferredMode?: NoteWindowMode): Promise<NoteWindowState | null> {
+    if (inTauri) return invoke('open_note_window', { noteId, preferredMode: preferredMode ?? null })
+    const state: NoteWindowState = {
+      noteId, mode: preferredMode ?? 'card', visible: true,
+      alwaysOnTop: DEFAULT_SETTINGS.defaultNoteAlwaysOnTop,
+      opacity: DEFAULT_SETTINGS.defaultNoteOpacity, locked: false,
+      dockEdge: null, dockOffset: 0, monitorKey: null, updatedAt: now(),
+    }
+    localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state))
+    return state
   },
 
-  async closeEditorWindow(): Promise<void> {
-    if (inTauri) await invoke('close_editor_window')
+  async noteWindowReady(noteId: string): Promise<NoteWindowState> {
+    if (inTauri) return invoke('note_window_ready', { noteId })
+    return this.getNoteWindowState(noteId)
+  },
+
+  async getNoteWindowState(noteId: string): Promise<NoteWindowState> {
+    if (inTauri) return invoke('get_note_window_state', { noteId })
+    const stored = localStorage.getItem(`qingjian.mock.window.${noteId}`)
+    if (stored) return JSON.parse(stored)
+    return (await this.openNoteWindow(noteId, 'card'))!
+  },
+
+  async listVisibleNoteWindows(): Promise<NoteWindowState[]> {
+    if (inTauri) return invoke('list_visible_note_windows')
+    return Object.keys(localStorage).filter((key) => key.startsWith('qingjian.mock.window.'))
+      .map((key) => JSON.parse(localStorage.getItem(key)!)).filter((state) => state.visible)
+  },
+
+  async setNoteWindowMode(noteId: string, mode: NoteWindowMode): Promise<NoteWindowState> {
+    if (inTauri) return invoke('set_note_window_mode', { noteId, mode })
+    const state = await this.getNoteWindowState(noteId); state.mode = mode
+    localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state)); return state
+  },
+
+  async setNoteWindowAlwaysOnTop(noteId: string, alwaysOnTop: boolean): Promise<NoteWindowState> {
+    if (inTauri) return invoke('set_note_window_always_on_top', { noteId, alwaysOnTop })
+    const state = await this.getNoteWindowState(noteId); state.alwaysOnTop = alwaysOnTop
+    localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state)); return state
+  },
+
+  async setNoteWindowOpacity(noteId: string, opacity: number): Promise<NoteWindowState> {
+    if (inTauri) return invoke('set_note_window_opacity', { noteId, opacity })
+    const state = await this.getNoteWindowState(noteId); state.opacity = Math.max(60, Math.min(100, opacity))
+    localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state)); return state
+  },
+
+  async setNoteWindowLocked(noteId: string, locked: boolean): Promise<NoteWindowState> {
+    if (inTauri) return invoke('set_note_window_locked', { noteId, locked })
+    const state = await this.getNoteWindowState(noteId); state.locked = locked
+    localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state)); return state
+  },
+
+  async hideNoteWindow(noteId: string): Promise<void> {
+    if (inTauri) return invoke('hide_note_window', { noteId })
+    const state = await this.getNoteWindowState(noteId); state.visible = false
+    localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state))
+  },
+
+  async saveNoteWindowGeometry(noteId: string): Promise<void> {
+    if (inTauri) return invoke('save_note_window_geometry', { noteId })
+  },
+
+  async finalizeNoteWindowMove(noteId: string): Promise<NoteWindowState> {
+    if (inTauri) return invoke('finalize_note_window_move', { noteId })
+    return this.getNoteWindowState(noteId)
+  },
+
+  async collapseDockedNoteWindow(noteId: string): Promise<void> {
+    if (inTauri) return invoke('collapse_docked_note_window', { noteId })
+  },
+
+  async expandDockedNoteWindow(noteId: string): Promise<void> {
+    if (inTauri) return invoke('expand_docked_note_window', { noteId })
+  },
+
+  async unlockAllNoteWindows(): Promise<void> {
+    if (inTauri) return invoke('unlock_all_note_windows')
   },
 
   async showHubWindow(): Promise<void> {
@@ -298,6 +375,11 @@ export const backend = {
 
   async exportHtml(noteId: string, destination: string, html: string): Promise<void> {
     if (inTauri) return invoke('export_html', { noteId, destination, html })
+    throw new Error('请在桌面版中使用导出功能')
+  },
+
+  async exportMarkdown(destination: string, markdown: string): Promise<void> {
+    if (inTauri) return invoke('export_markdown', { destination, markdown })
     throw new Error('请在桌面版中使用导出功能')
   },
 

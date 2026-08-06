@@ -57,7 +57,7 @@ pub struct SaveNoteInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub hotkey: String,
     pub start_on_boot: bool,
@@ -65,7 +65,11 @@ pub struct AppSettings {
     pub default_font_family: String,
     pub default_font_size: u16,
     pub sidebar_collapsed: bool,
-    pub always_on_top: bool,
+    #[serde(alias = "alwaysOnTop")]
+    pub default_note_always_on_top: bool,
+    pub default_note_opacity: u8,
+    pub restore_note_windows_on_boot: bool,
+    pub check_updates_on_startup: bool,
     pub window_layout: String,
     pub hotkey_window_scope: String,
     pub hotkey_action: String,
@@ -80,7 +84,10 @@ impl Default for AppSettings {
             default_font_family: "Microsoft YaHei UI".into(),
             default_font_size: 16,
             sidebar_collapsed: false,
-            always_on_top: false,
+            default_note_always_on_top: false,
+            default_note_opacity: 100,
+            restore_note_windows_on_boot: true,
+            check_updates_on_startup: true,
             window_layout: "integrated".into(),
             hotkey_window_scope: "editor".into(),
             hotkey_action: "last-note".into(),
@@ -104,6 +111,7 @@ mod tests {
     #[test]
     fn hotkey_defaults_to_the_last_note() {
         assert_eq!(AppSettings::default().hotkey_action, "last-note");
+        assert!(AppSettings::default().check_updates_on_startup);
     }
 
     #[test]
@@ -120,6 +128,37 @@ pub struct WorkspaceState {
     #[serde(default)]
     pub open_note_ids: Vec<String>,
     pub active_note_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteWindowState {
+    pub note_id: String,
+    pub mode: String,
+    pub visible: bool,
+    pub always_on_top: bool,
+    pub opacity: u8,
+    pub locked: bool,
+    pub dock_edge: Option<String>,
+    pub dock_offset: f64,
+    pub monitor_key: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteWindowGeometry {
+    pub note_id: String,
+    pub mode: String,
+    pub x_ratio: f64,
+    pub y_ratio: f64,
+    pub width_dip: f64,
+    pub height_dip: f64,
+    pub work_area_x: i32,
+    pub work_area_y: i32,
+    pub work_area_width: u32,
+    pub work_area_height: u32,
+    pub scale_factor: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

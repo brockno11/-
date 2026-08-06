@@ -13,6 +13,7 @@
   import Toolbar from './components/Toolbar.svelte'
   import { backend } from './lib/backend'
   import { documentTitle } from './lib/editor'
+  import { serializeMarkdown } from './lib/markdown'
   import { tooltip } from './lib/tooltip'
   import { DEFAULT_SETTINGS } from './lib/types'
   import type {
@@ -186,7 +187,7 @@
     try {
       await flushSave()
       await persistWorkspace()
-      await backend.closeEditorWindow()
+      await getCurrentWindow().hide()
     } finally {
       closing = false
     }
@@ -219,18 +220,25 @@
   }
 
   function selectedClipboardContent() {
-    if (!editor) return { text: '', html: '' }
+    if (!editor) return { text: '', html: '', markdown: '' }
     const { selection, doc, schema } = editor.state
     const fragment = selection.empty ? doc.content : selection.content().content
     const wrapper = document.createElement('div')
     wrapper.appendChild(DOMSerializer.fromSchema(schema).serializeFragment(fragment))
+    const markdown = serializeMarkdown({
+      type: 'doc',
+      content: fragment.toJSON() as Record<string, unknown>[],
+    }, {
+      assetUrl: (assetPath, source) => assetPath || source,
+    })
     return {
       text: selection.empty ? editor.getText() : doc.textBetween(selection.from, selection.to, '\n'),
       html: wrapper.innerHTML,
+      markdown,
     }
   }
 
-  async function copyContent(mode: 'rich' | 'text' | 'html') {
+  async function copyContent(mode: 'rich' | 'text' | 'html' | 'markdown') {
     if (!editor) return
     const content = selectedClipboardContent()
     try {
@@ -240,10 +248,17 @@
           'text/html': new Blob([content.html], { type: 'text/html' }),
         })])
       } else {
-        await navigator.clipboard.writeText(mode === 'html' ? content.html : content.text)
+        await navigator.clipboard.writeText(
+          mode === 'html' ? content.html : mode === 'markdown' ? content.markdown : content.text,
+        )
       }
       menuOpen = false
-      showToast(mode === 'rich' ? '已复制并保留源格式' : mode === 'html' ? '已复制 HTML 源码' : '已复制纯文本')
+      showToast(
+        mode === 'rich' ? '已复制并保留源格式'
+          : mode === 'html' ? '已复制 HTML 源码'
+            : mode === 'markdown' ? '已复制 Markdown'
+              : '已复制纯文本',
+      )
     } catch {
       showToast('复制失败，请检查系统剪贴板权限')
     }
@@ -272,6 +287,19 @@
     if (!destination) return
     await backend.exportHtml(activeNote.id, destination, editor.getHTML())
     showToast('HTML 已导出')
+  }
+
+  async function exportMarkdown() {
+    if (!activeNote || !editor) return
+    menuOpen = false
+    const destination = backend.isDesktop ? await save({
+      title: '导出 Markdown', defaultPath: `${activeNote.title}.md`,
+      filters: [{ name: 'Markdown 文档', extensions: ['md'] }],
+    }) : null
+    if (!destination) return
+    const markdown = serializeMarkdown(editor.getJSON(), { title: activeNote.title })
+    await backend.exportMarkdown(destination, markdown)
+    showToast('Markdown 已导出')
   }
 
   async function exportPdf() {
@@ -325,7 +353,7 @@
       event.preventDefault()
       void backend.createNote(null).then(async (note) => {
         await emitDesktop('qingjian://notes-changed')
-        await backend.openNoteInEditor(note.id, settings.alwaysOnTop)
+        await backend.openNoteWindow(note.id, 'card')
       })
     } else if (event.ctrlKey && event.key === ',') {
       event.preventDefault()
@@ -353,7 +381,7 @@
         else await destroyEditor()
 
         if (!backend.isDesktop || disposed) return
-        await getCurrentWindow().setAlwaysOnTop(settings.alwaysOnTop)
+        await getCurrentWindow().setAlwaysOnTop(settings.defaultNoteAlwaysOnTop)
         cleanups.push(await getCurrentWindow().onCloseRequested((event) => {
           event.preventDefault()
           void destroyEditor()
@@ -362,7 +390,7 @@
           listen<string>('qingjian://open-note', (event) => void acceptOpenRequest(event.payload)),
           listen<AppSettings>('qingjian://settings-changed', (event) => {
             settings = event.payload
-            void getCurrentWindow().setAlwaysOnTop(settings.alwaysOnTop)
+            void getCurrentWindow().setAlwaysOnTop(settings.defaultNoteAlwaysOnTop)
           }),
           listen('qingjian://flush-and-quit', () => {
             void flushSave().finally(() => emitDesktop('qingjian://ready-to-quit'))
@@ -458,8 +486,10 @@
               <small class="menu-group-label">复制内容</small>
               <button on:click={() => void copyContent('rich')}><Copy />保留源格式</button>
               <button on:click={() => void copyContent('text')}><Text />纯文本</button>
+              <button on:click={() => void copyContent('markdown')}><Code2 />Markdown</button>
               <button on:click={() => void copyContent('html')}><Code2 />HTML 源码</button>
               <span class="menu-separator"></span>
+              <button on:click={() => void exportMarkdown()}><FileDown />导出 Markdown</button>
               <button on:click={() => { menuOpen = false; void exportHtml() }}><FileDown />导出 HTML</button>
               <button on:click={() => void exportPdf()}><Download />导出 PDF</button>
               <button on:click={() => { menuOpen = false; void toggleArchive() }}>

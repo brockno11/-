@@ -3,6 +3,8 @@ export type SaveState = 'saved' | 'saving' | 'dirty' | 'error'
 export type WindowLayout = 'integrated' | 'separate'
 export type HotkeyWindowScope = 'editor' | 'both'
 export type HotkeyAction = 'last-note' | 'new-note'
+export type NoteWindowMode = 'capsule' | 'card' | 'editor'
+export type DockEdge = 'left' | 'right' | 'top' | 'bottom' | null
 
 export interface Tag {
   id: string
@@ -37,6 +39,33 @@ export interface WorkspaceState {
   activeNoteId: string | null
 }
 
+export interface NoteWindowState {
+  noteId: string
+  mode: NoteWindowMode
+  visible: boolean
+  alwaysOnTop: boolean
+  opacity: number
+  locked: boolean
+  dockEdge: DockEdge
+  dockOffset: number
+  monitorKey: string | null
+  updatedAt: string
+}
+
+export interface NoteWindowGeometry {
+  noteId: string
+  mode: NoteWindowMode
+  xRatio: number
+  yRatio: number
+  widthDip: number
+  heightDip: number
+  workAreaX: number
+  workAreaY: number
+  workAreaWidth: number
+  workAreaHeight: number
+  scaleFactor: number
+}
+
 export interface Note extends NoteSummary {
   content: Record<string, unknown>
 }
@@ -48,7 +77,10 @@ export interface AppSettings {
   defaultFontFamily: string
   defaultFontSize: number
   sidebarCollapsed: boolean
-  alwaysOnTop: boolean
+  defaultNoteAlwaysOnTop: boolean
+  defaultNoteOpacity: number
+  restoreNoteWindowsOnBoot: boolean
+  checkUpdatesOnStartup: boolean
   windowLayout: WindowLayout
   hotkeyWindowScope: HotkeyWindowScope
   hotkeyAction: HotkeyAction
@@ -85,7 +117,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultFontFamily: 'Microsoft YaHei UI',
   defaultFontSize: 16,
   sidebarCollapsed: false,
-  alwaysOnTop: false,
+  defaultNoteAlwaysOnTop: false,
+  defaultNoteOpacity: 100,
+  restoreNoteWindowsOnBoot: true,
+  checkUpdatesOnStartup: true,
   windowLayout: 'integrated',
   hotkeyWindowScope: 'editor',
   hotkeyAction: 'last-note',

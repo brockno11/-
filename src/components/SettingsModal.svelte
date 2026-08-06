@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    X, Keyboard, SunMoon, Rocket, Download, Upload, MousePointerClick, Pin, Type,
+    X, Keyboard, SunMoon, Rocket, Download, Upload, MousePointerClick, Pin, Type, RefreshCw,
   } from 'lucide-svelte'
   import type { AppSettings, Theme } from '../lib/types'
   import { tooltip } from '../lib/tooltip'
@@ -10,6 +10,9 @@
   export let onClose: () => void
   export let onBackup: () => void
   export let onRestore: () => void
+  export let appVersion = '0.5.0'
+  export let checkingUpdate = false
+  export let onCheckUpdate: () => void
 
   let draft = structuredClone(settings)
   let saving = false
@@ -94,9 +97,22 @@
 
       <label class="setting-row">
         <span class="setting-icon"><Pin /></span>
-        <span class="setting-copy"><strong>窗口始终置顶</strong><small>工作台和打开的编辑器保持在其他窗口上方</small></span>
-        <input class="switch" type="checkbox" bind:checked={draft.alwaysOnTop} />
+        <span class="setting-copy"><strong>新便签默认置顶</strong><small>只影响之后新建的桌面便签，工作台不会置顶</small></span>
+        <input class="switch" type="checkbox" bind:checked={draft.defaultNoteAlwaysOnTop} />
       </label>
+
+      <label class="setting-row">
+        <span class="setting-icon"><SunMoon /></span>
+        <span class="setting-copy"><strong>新便签默认透明度</strong><small>每张便签仍可单独调整，范围 60%–100%</small></span>
+        <input type="range" min="60" max="100" step="5" bind:value={draft.defaultNoteOpacity} />
+        <b>{draft.defaultNoteOpacity}%</b>
+      </label>
+
+      <div class="setting-row">
+        <span class="setting-icon"><Keyboard /></span>
+        <span class="setting-copy"><strong>解锁快捷键</strong><small>锁定后完全鼠标穿透；按 Ctrl+Alt+L 或使用托盘菜单恢复</small></span>
+        <kbd>Ctrl+Alt+L</kbd>
+      </div>
 
       <div class="setting-row">
         <span class="setting-icon"><Type /></span>
@@ -119,6 +135,26 @@
         <span class="setting-copy"><strong>开机自动启动</strong><small>静默驻留托盘，不主动弹出窗口</small></span>
         <input class="switch" type="checkbox" bind:checked={draft.startOnBoot} />
       </label>
+
+      <label class="setting-row">
+        <span class="setting-icon"><Pin /></span>
+        <span class="setting-copy"><strong>开机恢复桌面便签</strong><small>恢复上次可见便签，但不弹出工作台</small></span>
+        <input class="switch" type="checkbox" bind:checked={draft.restoreNoteWindowsOnBoot} />
+      </label>
+
+      <label class="setting-row">
+        <span class="setting-icon"><RefreshCw /></span>
+        <span class="setting-copy"><strong>自动检查更新</strong><small>启动后检查 GitHub 正式版，有新版本时弹窗提醒</small></span>
+        <input class="switch" type="checkbox" bind:checked={draft.checkUpdatesOnStartup} />
+      </label>
+
+      <div class="setting-row">
+        <span class="setting-icon"><Download /></span>
+        <span class="setting-copy"><strong>软件更新</strong><small>当前版本 {appVersion}，可随时手动检查</small></span>
+        <button class="secondary update-check-button" disabled={checkingUpdate} on:click={onCheckUpdate}>
+          {checkingUpdate ? '检查中…' : '检查更新'}
+        </button>
+      </div>
 
       <div class="setting-row">
         <span class="setting-icon"><Download /></span>

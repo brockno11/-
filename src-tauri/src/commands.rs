@@ -255,7 +255,7 @@ pub fn save_note(state: State<'_, AppState>, input: SaveNoteInput) -> Result<Not
 }
 
 #[tauri::command]
-pub fn delete_note(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<(), AppError> {
     let db = lock_db(&state)?;
     let timestamp = Utc::now().to_rfc3339();
     let changed = db.execute(
@@ -266,6 +266,8 @@ pub fn delete_note(state: State<'_, AppState>, id: String) -> Result<(), AppErro
         return Err(AppError::Invalid("便签不存在或已在回收站".into()));
     }
     remove_note_from_workspace(&db, &id)?;
+    drop(db);
+    crate::windows::hide_and_destroy_note_window(&app, &id);
     Ok(())
 }
 
@@ -300,7 +302,7 @@ pub fn restore_note(state: State<'_, AppState>, id: String) -> Result<(), AppErr
 }
 
 #[tauri::command]
-pub fn permanently_delete_note(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+pub fn permanently_delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<(), AppError> {
     let db = lock_db(&state)?;
     let changed = db.execute(
         "DELETE FROM notes WHERE id=?1 AND trashed_at IS NOT NULL",
@@ -310,18 +312,26 @@ pub fn permanently_delete_note(state: State<'_, AppState>, id: String) -> Result
         return Err(AppError::Invalid("只能永久删除回收站中的便签".into()));
     }
     remove_note_from_workspace(&db, &id)?;
+    drop(db);
+    crate::windows::hide_and_destroy_note_window(&app, &id);
     Ok(())
 }
 
 #[tauri::command]
-pub fn empty_trash(state: State<'_, AppState>) -> Result<(), AppError> {
+pub fn empty_trash(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), AppError> {
     let db = lock_db(&state)?;
+    let ids = db.prepare("SELECT id FROM notes WHERE trashed_at IS NOT NULL")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
     db.execute("DELETE FROM notes WHERE trashed_at IS NOT NULL", [])?;
+    drop(db);
+    for id in ids { crate::windows::hide_and_destroy_note_window(&app, &id); }
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_note_archived(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
     archived: bool,
@@ -335,6 +345,8 @@ pub fn set_note_archived(
     if changed == 0 {
         return Err(AppError::Invalid("便签不存在".into()));
     }
+    drop(db);
+    if archived { crate::windows::hide_and_destroy_note_window(&app, &id); }
     Ok(())
 }
 
@@ -625,7 +637,16 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, AppError>
     match value {
         Some(json) => {
             let defaults = serde_json::to_value(AppSettings::default())?;
-            let stored: serde_json::Value = serde_json::from_str(&json)?;
+            let mut stored: serde_json::Value = serde_json::from_str(&json)?;
+            if let serde_json::Value::Object(values) = &mut stored {
+                if !values.contains_key("defaultNoteAlwaysOnTop") {
+                    if let Some(value) = values.remove("alwaysOnTop") {
+                        values.insert("defaultNoteAlwaysOnTop".into(), value);
+                    }
+                } else {
+                    values.remove("alwaysOnTop");
+                }
+            }
             let merged = match (defaults, stored) {
                 (serde_json::Value::Object(mut base), serde_json::Value::Object(stored)) => {
                     base.extend(stored);
@@ -646,6 +667,9 @@ pub fn save_settings(
 ) -> Result<AppSettings, AppError> {
     if !(9..=72).contains(&settings.default_font_size) {
         return Err(AppError::Invalid("默认字号必须在 9 到 72 之间".into()));
+    }
+    if !(60..=100).contains(&settings.default_note_opacity) {
+        return Err(AppError::Invalid("默认透明度必须在 60% 到 100% 之间".into()));
     }
     if settings.hotkey.trim().is_empty() || !settings.hotkey.contains('+') {
         return Err(AppError::Invalid("全局快捷键必须是组合键".into()));
@@ -857,6 +881,49 @@ blockquote{{margin-left:0;padding-left:14px;border-left:3px solid #f1d887;color:
     Ok(())
 }
 
+#[tauri::command]
+pub fn export_markdown(
+    state: State<'_, AppState>,
+    destination: String,
+    markdown: String,
+) -> Result<(), AppError> {
+    let destination = PathBuf::from(destination);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::Invalid("导出路径无效".into()))?;
+    fs::create_dir_all(parent)?;
+    let stem = destination
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("轻笺");
+    let resource_name = format!("{stem}_assets");
+    let resource_dir = parent.join(&resource_name);
+    let asset_regex = Regex::new(r"qingjian-asset:([^\s\)>\]]+)")
+        .map_err(|error| AppError::Other(error.to_string()))?;
+    let mut rendered = markdown.clone();
+    let mut created_resource_dir = false;
+
+    for captures in asset_regex.captures_iter(&markdown) {
+        let Some(marker) = captures.get(0).map(|value| value.as_str()) else { continue };
+        let Some(asset) = captures.get(1).map(|value| value.as_str()) else { continue };
+        let Some(file_name) = Path::new(asset).file_name() else { continue };
+        let source = state.assets_dir.join(file_name);
+        if !source.is_file() { continue }
+        if !created_resource_dir {
+            fs::create_dir_all(&resource_dir)?;
+            created_resource_dir = true;
+        }
+        fs::copy(&source, resource_dir.join(file_name))?;
+        rendered = rendered.replace(
+            marker,
+            &format!("{resource_name}/{}", file_name.to_string_lossy()),
+        );
+    }
+
+    fs::write(destination, rendered)?;
+    Ok(())
+}
+
 #[cfg(windows)]
 #[tauri::command]
 pub async fn export_pdf(
@@ -945,7 +1012,7 @@ fn write_backup(state: &State<'_, AppState>, destination: &Path) -> Result<(), A
     }
     let manifest = BackupManifest {
         format: "qingjian-backup".into(),
-        schema_version: 2,
+        schema_version: 4,
         app_version: env!("CARGO_PKG_VERSION").into(),
         created_at: Utc::now().to_rfc3339(),
         files,
@@ -1009,7 +1076,7 @@ pub fn restore_backup(
         entry.read_to_string(&mut json)?;
         serde_json::from_str(&json)?
     };
-    if manifest.format != "qingjian-backup" || manifest.schema_version > 2 {
+    if manifest.format != "qingjian-backup" || manifest.schema_version > 4 {
         return Err(AppError::Invalid("该备份版本不受当前轻笺支持".into()));
     }
     let incoming_path = temp.path().join("incoming.db");
@@ -1025,7 +1092,7 @@ pub fn restore_backup(
     }
     let incoming = Connection::open(&incoming_path)?;
     let version: u32 = incoming.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > 2 {
+    if version > 4 {
         return Err(AppError::Invalid("备份数据库版本过新".into()));
     }
     drop(incoming);
@@ -1046,7 +1113,8 @@ pub fn restore_backup(
             tx.execute_batch(
                 "DELETE FROM note_tags; DELETE FROM tags; DELETE FROM notes;
                  DELETE FROM folders; DELETE FROM attachments; DELETE FROM settings;
-                 DELETE FROM workspace_state;",
+                 DELETE FROM workspace_state; DELETE FROM note_window_geometry;
+                 DELETE FROM note_window_state;",
             )?;
         }
         let insert_mode = if replace { "OR REPLACE" } else { "OR IGNORE" };
@@ -1093,6 +1161,20 @@ pub fn restore_backup(
                 SELECT id,sha256,asset_path,mime,width,height,size_bytes,created_at
                 FROM incoming.attachments;"
         ))?;
+        if version >= 4 {
+            tx.execute_batch(&format!(
+                "INSERT {insert_mode} INTO note_window_state(
+                    note_id,mode,visible,always_on_top,opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+                 ) SELECT note_id,mode,visible,always_on_top,opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+                   FROM incoming.note_window_state;
+                 INSERT {insert_mode} INTO note_window_geometry(
+                    note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
+                    work_area_width,work_area_height,scale_factor
+                 ) SELECT note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
+                          work_area_width,work_area_height,scale_factor
+                   FROM incoming.note_window_geometry;"
+            ))?;
+        }
         if replace {
             tx.execute_batch("INSERT OR REPLACE INTO settings SELECT * FROM incoming.settings;")?;
             if version >= 2 {

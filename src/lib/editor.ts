@@ -1,4 +1,4 @@
-import { ResizableNodeView } from '@tiptap/core'
+import { Extension, InputRule, ResizableNodeView } from '@tiptap/core'
 import Image from '@tiptap/extension-image'
 import { NodeSelection, TextSelection } from '@tiptap/pm/state'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
@@ -9,6 +9,29 @@ export type ImageLayout =
   | 'block-right'
   | 'wrap-left'
   | 'wrap-right'
+
+export const MarkdownTaskShortcut = Extension.create({
+  name: 'markdownTaskShortcut',
+
+  addInputRules() {
+    return [
+      new InputRule({
+        find: /^\[([ xX])\]\s$/,
+        handler: ({ state, range, match, chain }) => {
+          const $from = state.doc.resolve(range.from)
+          const inBulletList = Array.from({ length: $from.depth + 1 }, (_, depth) => depth)
+            .some((depth) => $from.node(depth).type.name === 'bulletList')
+          if (!inBulletList) return null
+          chain()
+            .deleteRange(range)
+            .toggleTaskList()
+            .updateAttributes('taskItem', { checked: match[1].toLowerCase() === 'x' })
+            .run()
+        },
+      }),
+    ]
+  },
+})
 
 export function normalizeImageLayout(value: unknown): ImageLayout {
   if (value === 'block-left' || value === 'block-right') return value
@@ -177,10 +200,4 @@ export async function fileToDataUrl(file: Blob): Promise<string> {
   })
 }
 
-export function documentTitle(plainText: string): string {
-  const firstLine = plainText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean)
-  return (firstLine || '新便签').slice(0, 80)
-}
+export { documentTitle } from './note'
