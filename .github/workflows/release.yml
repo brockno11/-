@@ -40,7 +40,7 @@ jobs:
           npm test
 
       - name: 构建签名安装包并创建 GitHub Release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -54,6 +54,7 @@ jobs:
             推荐下载 `轻笺_*_x64-setup.exe` 安装包；应用内更新由签名文件和 `latest.json` 自动完成。
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           updaterJsonPreferNsis: true
+          releaseAssetNamePattern: qingjian-[version]-[arch][setup][ext]
           args: --target x86_64-pc-windows-msvc
