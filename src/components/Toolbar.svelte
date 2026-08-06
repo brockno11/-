@@ -4,7 +4,7 @@
   import {
     Bold, Italic, Underline, Strikethrough, List, ListOrdered, CircleCheckBig,
     AlignLeft, AlignCenter, AlignRight, ImagePlus, Table2, Rows3, Columns3,
-    Trash2, Minus, Plus, Image as ImageIcon, RotateCcw, WrapText,
+    Trash2, Minus, Plus, Image as ImageIcon, RotateCcw, WrapText, MoreHorizontal,
   } from 'lucide-svelte'
   import { normalizeImageLayout, type ImageLayout } from '../lib/editor'
   import { tooltip } from '../lib/tooltip'
@@ -13,6 +13,8 @@
   export let fonts: string[] = []
   export let version = 0
   export let onPickImage: () => void
+  export let menuOpen = false
+  export let onMenuOpenChange: (open: boolean) => void = () => undefined
 
   const sizes = [9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 64, 72]
   const preferredFonts = [
@@ -40,6 +42,7 @@
   $: imageAttributes = version >= 0 ? (editor?.getAttributes('image') ?? {}) : {}
   $: imageLayout = normalizeImageLayout(imageAttributes.layout)
   $: imageWidth = Number(imageAttributes.width) || 0
+  $: if (imageSelected && menuOpen) onMenuOpenChange(false)
   $: fontChoices = Array.from(new Set([
     ...(currentFont ? [currentFont] : []),
     ...preferredFonts.filter((font) => fonts.includes(font)),
@@ -48,6 +51,18 @@
   function command(action: () => boolean | void) {
     action()
     editor?.commands.focus()
+  }
+
+  function toggleMore() {
+    rememberTextSelection()
+    onMenuOpenChange(!menuOpen)
+  }
+
+  function moreCommand(action: () => boolean | void) {
+    onMenuOpenChange(false)
+    action()
+    editor?.commands.focus()
+    rememberedSelection = null
   }
 
   function rememberTextSelection() {
@@ -224,29 +239,50 @@
 
     <span class="toolbar-divider"></span>
     <button class:active={editor?.isActive('bold')} aria-label="粗体 Ctrl+B" use:tooltip={'粗体 · Ctrl+B'} on:click={() => command(() => editor?.chain().focus().toggleBold().run())}><Bold /></button>
-    <button class:active={editor?.isActive('italic')} aria-label="斜体 Ctrl+I" use:tooltip={'斜体 · Ctrl+I'} on:click={() => command(() => editor?.chain().focus().toggleItalic().run())}><Italic /></button>
-    <button class:active={editor?.isActive('underline')} aria-label="下划线 Ctrl+U" use:tooltip={'下划线 · Ctrl+U'} on:click={() => command(() => editor?.chain().focus().toggleUnderline().run())}><Underline /></button>
-    <button class:active={editor?.isActive('strike')} aria-label="删除线" use:tooltip={'删除线'} on:click={() => command(() => editor?.chain().focus().toggleStrike().run())}><Strikethrough /></button>
-
-    <span class="toolbar-divider"></span>
-    <button class:active={editor?.isActive('bulletList')} aria-label="项目符号" use:tooltip={'项目符号'} on:click={() => command(() => editor?.chain().focus().toggleBulletList().run())}><List /></button>
-    <button class:active={editor?.isActive('orderedList')} aria-label="编号列表" use:tooltip={'编号列表'} on:click={() => command(() => editor?.chain().focus().toggleOrderedList().run())}><ListOrdered /></button>
     <button class:active={editor?.isActive('taskList')} aria-label="圆圈待办" use:tooltip={'圆圈待办 · 点击圆圈即可完成'} on:click={() => command(() => editor?.chain().focus().toggleTaskList().run())}><CircleCheckBig /></button>
-
-    <span class="toolbar-divider"></span>
-    <button class:active={editor?.isActive({ textAlign: 'left' })} aria-label="左对齐" use:tooltip={'左对齐'} on:click={() => command(() => editor?.chain().focus().setTextAlign('left').run())}><AlignLeft /></button>
-    <button class:active={editor?.isActive({ textAlign: 'center' })} aria-label="居中" use:tooltip={'居中'} on:click={() => command(() => editor?.chain().focus().setTextAlign('center').run())}><AlignCenter /></button>
-    <button class:active={editor?.isActive({ textAlign: 'right' })} aria-label="右对齐" use:tooltip={'右对齐'} on:click={() => command(() => editor?.chain().focus().setTextAlign('right').run())}><AlignRight /></button>
-
-    <span class="toolbar-divider"></span>
     <button aria-label="插入图片" use:tooltip={'插入图片'} on:click={onPickImage}><ImagePlus /></button>
-    <button aria-label="插入 3×3 表格" use:tooltip={'插入 3×3 表格'} on:click={() => command(() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run())}><Table2 /></button>
-
-    {#if inTable}
-      <button aria-label="添加一行" use:tooltip={'添加一行'} on:click={() => command(() => editor?.chain().focus().addRowAfter().run())}><Rows3 /><Plus class="corner-icon" /></button>
-      <button aria-label="添加一列" use:tooltip={'添加一列'} on:click={() => command(() => editor?.chain().focus().addColumnAfter().run())}><Columns3 /><Plus class="corner-icon" /></button>
-      <button aria-label="删除当前行" use:tooltip={'删除当前行'} on:click={() => command(() => editor?.chain().focus().deleteRow().run())}><Rows3 /><Minus class="corner-icon" /></button>
-      <button aria-label="删除表格" use:tooltip={'删除表格'} on:click={() => command(() => editor?.chain().focus().deleteTable().run())}><Trash2 /></button>
-    {/if}
+    <div class="format-more-anchor" data-transient-root>
+      <button class:active={menuOpen} aria-label="更多格式" use:tooltip={'更多格式'} on:mousedown|preventDefault={rememberTextSelection} on:click={toggleMore}><MoreHorizontal /></button>
+      {#if menuOpen}
+        <div class="format-more-menu" role="menu" aria-label="更多格式">
+          <section>
+            <small>文字</small>
+            <div>
+              <button class:active={editor?.isActive('italic')} aria-label="斜体" on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleItalic().run())}><Italic /><span>斜体</span></button>
+              <button class:active={editor?.isActive('underline')} aria-label="下划线" on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleUnderline().run())}><Underline /><span>下划线</span></button>
+              <button class:active={editor?.isActive('strike')} aria-label="删除线" on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleStrike().run())}><Strikethrough /><span>删除线</span></button>
+            </div>
+          </section>
+          <section>
+            <small>列表</small>
+            <div>
+              <button class:active={editor?.isActive('bulletList')} on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleBulletList().run())}><List /><span>项目符号</span></button>
+              <button class:active={editor?.isActive('orderedList')} on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleOrderedList().run())}><ListOrdered /><span>编号列表</span></button>
+            </div>
+          </section>
+          <section>
+            <small>对齐</small>
+            <div>
+              <button class:active={editor?.isActive({ textAlign: 'left' })} on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().setTextAlign('left').run())}><AlignLeft /><span>左对齐</span></button>
+              <button class:active={editor?.isActive({ textAlign: 'center' })} on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().setTextAlign('center').run())}><AlignCenter /><span>居中</span></button>
+              <button class:active={editor?.isActive({ textAlign: 'right' })} on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().setTextAlign('right').run())}><AlignRight /><span>右对齐</span></button>
+            </div>
+          </section>
+          <section>
+            <small>{inTable ? '表格操作' : '插入'}</small>
+            <div class="table-menu-grid">
+              {#if !inTable}
+                <button on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run())}><Table2 /><span>3×3 表格</span></button>
+              {:else}
+                <button on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().addRowAfter().run())}><Rows3 /><span>增行</span><Plus class="corner-icon" /></button>
+                <button on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().addColumnAfter().run())}><Columns3 /><span>增列</span><Plus class="corner-icon" /></button>
+                <button on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().deleteRow().run())}><Rows3 /><span>删行</span><Minus class="corner-icon" /></button>
+                <button class="danger" on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().deleteTable().run())}><Trash2 /><span>删表格</span></button>
+              {/if}
+            </div>
+          </section>
+        </div>
+      {/if}
+    </div>
   {/if}
 </div>

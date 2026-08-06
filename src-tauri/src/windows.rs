@@ -36,6 +36,14 @@ fn validate_note_id(note_id: &str) -> Result<(), AppError> {
         .map_err(|_| AppError::Invalid("便签编号无效".into()))
 }
 
+fn validated_opacity(layer: &str, opacity: u8) -> Result<(&'static str, u8), AppError> {
+    match layer {
+        "background" => Ok(("opacity", opacity.min(100))),
+        "text" => Ok(("text_opacity", opacity.clamp(20, 100))),
+        _ => Err(AppError::Invalid("透明度层类型无效".into())),
+    }
+}
+
 fn note_label(note_id: &str) -> String {
     format!("{NOTE_PREFIX}{note_id}")
 }
@@ -72,32 +80,6 @@ fn update_window_appearance(window: &WebviewWindow) {
 
 #[cfg(not(target_os = "windows"))]
 fn update_window_appearance(_window: &WebviewWindow) {}
-
-#[cfg(target_os = "windows")]
-fn set_native_opacity(window: &WebviewWindow, opacity: u8) -> Result<(), AppError> {
-    use windows::Win32::{
-        Foundation::{COLORREF, HWND},
-        UI::WindowsAndMessaging::{
-            GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE, LWA_ALPHA,
-            WS_EX_LAYERED,
-        },
-    };
-    let raw = window.hwnd().map_err(|error| AppError::Other(error.to_string()))?;
-    let hwnd = HWND(raw.0);
-    let alpha = ((opacity as f32 / 100.0) * 255.0).round() as u8;
-    unsafe {
-        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as i32);
-        SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA)
-            .map_err(|error| AppError::Other(error.to_string()))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn set_native_opacity(_window: &WebviewWindow, _opacity: u8) -> Result<(), AppError> {
-    Ok(())
-}
 
 pub fn install_window_appearance(window: &WebviewWindow) {
     let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
@@ -143,14 +125,15 @@ fn read_settings(state: &AppState) -> Result<AppSettings, AppError> {
 fn read_window_state(state: &AppState, note_id: &str) -> Result<Option<NoteWindowState>, AppError> {
     let db = state.db.lock().map_err(|_| AppError::Other("数据库连接不可用".into()))?;
     db.query_row(
-        "SELECT note_id,mode,visible,always_on_top,opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+        "SELECT note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
          FROM note_window_state WHERE note_id=?1",
         [note_id],
         |row| Ok(NoteWindowState {
             note_id: row.get(0)?, mode: row.get(1)?, visible: row.get(2)?,
-            always_on_top: row.get(3)?, opacity: row.get::<_, i64>(4)? as u8,
-            locked: row.get(5)?, dock_edge: row.get(6)?, dock_offset: row.get(7)?,
-            monitor_key: row.get(8)?, updated_at: row.get(9)?,
+            always_on_top: row.get(3)?, background_opacity: row.get::<_, i64>(4)? as u8,
+            text_opacity: row.get::<_, i64>(5)? as u8, locked: row.get(6)?,
+            dock_edge: row.get(7)?, dock_offset: row.get(8)?, monitor_key: row.get(9)?,
+            updated_at: row.get(10)?,
         }),
     ).optional().map_err(Into::into)
 }
@@ -168,13 +151,15 @@ fn ensure_window_state(state: &AppState, note_id: &str, preferred_mode: Option<&
     let mode = preferred_mode.unwrap_or("card");
     db.execute(
         "INSERT INTO note_window_state(
-            note_id,mode,visible,always_on_top,opacity,locked,dock_offset,updated_at
-         ) VALUES(?1,?2,1,?3,?4,0,0,?5)
+            note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_offset,updated_at
+         ) VALUES(?1,?2,1,?3,?4,?5,0,0,?6)
          ON CONFLICT(note_id) DO UPDATE SET
-            mode=CASE WHEN ?6 THEN excluded.mode ELSE note_window_state.mode END,
+            mode=CASE WHEN ?7 THEN excluded.mode ELSE note_window_state.mode END,
             visible=1,updated_at=excluded.updated_at",
         params![note_id, mode, settings.default_note_always_on_top as i32,
-            settings.default_note_opacity.clamp(60, 100), Utc::now().to_rfc3339(), preferred_mode.is_some()],
+            settings.default_note_background_opacity.min(100),
+            settings.default_note_text_opacity.clamp(20, 100), Utc::now().to_rfc3339(),
+            preferred_mode.is_some()],
     )?;
     drop(db);
     read_window_state(state, note_id)?.ok_or_else(|| AppError::Other("无法建立便签窗口状态".into()))
@@ -353,7 +338,6 @@ pub async fn open_note_window(
     let already_open = app.get_webview_window(&note_label(&note_id)).is_some();
     let window = build_note_window(&app, &state, &note_state)?;
     if preferred_mode.is_some() { restore_geometry(&window, &state, &note_state)?; }
-    set_native_opacity(&window, note_state.opacity)?;
     set_lock_runtime(&window, note_state.locked)?;
     if already_open {
         let _ = window.emit("qingjian://window-state-changed", note_state.clone());
@@ -371,7 +355,6 @@ pub async fn note_window_ready(
 ) -> Result<NoteWindowState, AppError> {
     let note_state = read_window_state(&state, &note_id)?.ok_or_else(|| AppError::Invalid("便签窗口状态不存在".into()))?;
     let window = app.get_webview_window(&note_label(&note_id)).ok_or_else(|| AppError::Other("便签窗口尚未创建".into()))?;
-    set_native_opacity(&window, note_state.opacity)?;
     set_lock_runtime(&window, note_state.locked)?;
     if note_state.visible { show_window(&window, !note_state.locked)?; }
     Ok(note_state)
@@ -386,12 +369,13 @@ pub fn get_note_window_state(state: State<'_, AppState>, note_id: String) -> Res
 pub fn list_visible_note_windows(state: State<'_, AppState>) -> Result<Vec<NoteWindowState>, AppError> {
     let db = state.db.lock().map_err(|_| AppError::Other("数据库连接不可用".into()))?;
     let mut statement = db.prepare(
-        "SELECT note_id,mode,visible,always_on_top,opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+        "SELECT note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
          FROM note_window_state WHERE visible=1 ORDER BY updated_at DESC")?;
     let rows = statement.query_map([], |row| Ok(NoteWindowState {
         note_id: row.get(0)?, mode: row.get(1)?, visible: row.get(2)?, always_on_top: row.get(3)?,
-        opacity: row.get::<_, i64>(4)? as u8, locked: row.get(5)?, dock_edge: row.get(6)?,
-        dock_offset: row.get(7)?, monitor_key: row.get(8)?, updated_at: row.get(9)?,
+        background_opacity: row.get::<_, i64>(4)? as u8,
+        text_opacity: row.get::<_, i64>(5)? as u8, locked: row.get(6)?, dock_edge: row.get(7)?,
+        dock_offset: row.get(8)?, monitor_key: row.get(9)?, updated_at: row.get(10)?,
     }))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -450,16 +434,18 @@ pub fn set_note_window_always_on_top(
 
 #[tauri::command]
 pub fn set_note_window_opacity(
-    app: AppHandle, state: State<'_, AppState>, note_id: String, opacity: u8,
+    app: AppHandle, state: State<'_, AppState>, note_id: String, layer: String, opacity: u8,
 ) -> Result<NoteWindowState, AppError> {
-    let opacity = opacity.clamp(60, 100);
-    let window = app.get_webview_window(&note_label(&note_id)).ok_or_else(|| AppError::Other("便签窗口尚未创建".into()))?;
-    set_native_opacity(&window, opacity)?;
+    let (column, opacity) = validated_opacity(&layer, opacity)?;
     let db = state.db.lock().map_err(|_| AppError::Other("数据库连接不可用".into()))?;
-    db.execute("UPDATE note_window_state SET opacity=?2,updated_at=?3 WHERE note_id=?1",
+    db.execute(&format!("UPDATE note_window_state SET {column}=?2,updated_at=?3 WHERE note_id=?1"),
         params![note_id, opacity, Utc::now().to_rfc3339()])?;
     drop(db);
-    get_note_window_state(state, note_id)
+    let result = get_note_window_state(state, note_id.clone())?;
+    if let Some(window) = app.get_webview_window(&note_label(&note_id)) {
+        let _ = window.emit("qingjian://window-state-changed", result.clone());
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -573,7 +559,6 @@ pub fn show_all(app: &AppHandle) {
         if let Ok(note_state) = ensure_window_state(&state, &id, None) {
             let already_open = app.get_webview_window(&note_label(&id)).is_some();
             if let Ok(window) = build_note_window(app, &state, &note_state) {
-                let _ = set_native_opacity(&window, note_state.opacity);
                 let _ = set_lock_runtime(&window, note_state.locked);
                 if already_open { let _ = show_window(&window, false); }
             }
@@ -609,6 +594,31 @@ pub fn unlock_all(app: &AppHandle) {
 #[tauri::command]
 pub fn unlock_all_note_windows(app: AppHandle) {
     unlock_all(&app);
+}
+
+pub fn restore_visibility(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if let Ok(db) = state.db.lock() {
+        let _ = db.execute(
+            "UPDATE note_window_state SET opacity=85,text_opacity=100,updated_at=?1",
+            [Utc::now().to_rfc3339()],
+        );
+    }
+    if let Ok(ids) = list_window_ids(&state, false, false) {
+        for id in ids {
+            if let (Some(window), Ok(Some(note_state))) = (
+                app.get_webview_window(&note_label(&id)), read_window_state(&state, &id),
+            ) {
+                let _ = window.emit("qingjian://window-state-changed", note_state);
+            }
+        }
+    }
+    let _ = app.emit("qingjian://note-windows-changed", ());
+}
+
+#[tauri::command]
+pub fn restore_all_note_visibility(app: AppHandle) {
+    restore_visibility(&app);
 }
 
 fn list_window_ids(state: &AppState, locked_only: bool, include_hidden: bool) -> Result<Vec<String>, AppError> {
@@ -657,5 +667,14 @@ mod tests {
         assert_eq!(note_label(id), "note-550e8400-e29b-41d4-a716-446655440000");
         assert!(validate_note_id(id).is_ok());
         assert!(validate_note_id("../editor").is_err());
+    }
+
+    #[test]
+    fn opacity_layers_use_independent_safety_limits() {
+        assert_eq!(validated_opacity("background", 0).unwrap(), ("opacity", 0));
+        assert_eq!(validated_opacity("background", 200).unwrap(), ("opacity", 100));
+        assert_eq!(validated_opacity("text", 0).unwrap(), ("text_opacity", 20));
+        assert_eq!(validated_opacity("text", 200).unwrap(), ("text_opacity", 100));
+        assert!(validated_opacity("window", 80).is_err());
     }
 }

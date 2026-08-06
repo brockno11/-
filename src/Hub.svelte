@@ -48,7 +48,7 @@
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let quitFallback: ReturnType<typeof setTimeout> | undefined
   let pendingQuitIds = new Set<string>()
-  let appVersion = '0.5.0'
+  let appVersion = '0.6.0'
   let checkingUpdate = false
   let availableUpdate: AppUpdateInfo | null = null
   let installingUpdate = false
@@ -83,6 +83,24 @@
     toast = message
     clearTimeout(toastTimer)
     toastTimer = setTimeout(() => (toast = ''), 2400)
+  }
+
+  function openSettings() {
+    if (installingUpdate) return
+    availableUpdate = null
+    filtersOpen = false
+    contextMenu = null
+    settingsOpen = true
+  }
+
+  function handleHubBlur() {
+    contextMenu = null
+    filtersOpen = false
+    settingsOpen = false
+    if (!installingUpdate) {
+      availableUpdate = null
+      updateError = ''
+    }
   }
 
   async function emitDesktop(event: string, payload?: unknown) {
@@ -219,6 +237,7 @@
 
   function showContextMenu(event: MouseEvent, note: NoteSummary) {
     event.preventDefault()
+    filtersOpen = false
     contextMenu = {
       note,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)),
@@ -463,8 +482,10 @@
 
   function handleKeyboard(event: KeyboardEvent) {
     if (event.key === 'Escape') {
-      filtersOpen = false
-      contextMenu = null
+      if (availableUpdate && !installingUpdate) { availableUpdate = null; updateError = ''; return }
+      if (settingsOpen) { settingsOpen = false; return }
+      if (filtersOpen) { filtersOpen = false; return }
+      if (contextMenu) { contextMenu = null; return }
       if (selectionMode) clearSelection()
     } else if (event.ctrlKey && event.key.toLowerCase() === 'k') {
       event.preventDefault(); searchInput?.focus()
@@ -476,7 +497,7 @@
       selectedIds = new Set(visibleNotes.map((note) => note.id))
       selectionMode = selectedIds.size > 0
     } else if (event.ctrlKey && event.key === ',') {
-      event.preventDefault(); settingsOpen = true
+      event.preventDefault(); openSettings()
     }
   }
 
@@ -493,6 +514,9 @@
         await register('Ctrl+Alt+L', (event) => {
           if (event.state === 'Pressed') void backend.unlockAllNoteWindows()
         })
+        await register('Ctrl+Alt+O', (event) => {
+          if (event.state === 'Pressed') void backend.restoreAllNoteVisibility()
+        })
         cleanups.push(await getCurrentWindow().onCloseRequested((event) => {
           event.preventDefault(); void getCurrentWindow().hide()
         }))
@@ -501,7 +525,7 @@
           listen('qingjian://note-windows-changed', () => void refresh()),
           listen<WorkspaceState>('qingjian://workspace-changed', (event) => (workspace = event.payload)),
           listen('qingjian://new-note', () => void createNote()),
-          listen('qingjian://settings', () => (settingsOpen = true)),
+          listen('qingjian://settings', openSettings),
           listen('qingjian://check-update', () => void runUpdateCheck(true)),
           listen('qingjian://quit-requested', () => {
             void (async () => {
@@ -531,13 +555,14 @@
       cleanups.forEach((cleanup) => cleanup())
       if (registeredHotkey) void unregister(registeredHotkey)
       if (backend.isDesktop) void unregister('Ctrl+Alt+L')
+      if (backend.isDesktop) void unregister('Ctrl+Alt+O')
       clearTimeout(quitFallback)
       clearTimeout(startupUpdateTimer)
     }
   })
 </script>
 
-<svelte:window on:keydown={handleKeyboard} on:click={() => (contextMenu = null)} on:blur={() => (contextMenu = null)} />
+<svelte:window on:keydown={handleKeyboard} on:click={() => (contextMenu = null)} on:blur={handleHubBlur} />
 
 <main class={`hub-window hub-redesign ${compactPreview ? 'compact-preview' : ''} ${themeClass}`}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -547,7 +572,7 @@
       <div><strong>轻笺</strong><small>所有内容只在本机</small></div>
     </div>
     <div class="hub-window-actions">
-      <button class="ghost icon-only" aria-label="设置" use:tooltip={'设置 · Ctrl+,'} on:click={() => (settingsOpen = true)}><Settings /></button>
+      <button class="ghost icon-only" aria-label="设置" use:tooltip={'设置 · Ctrl+,'} on:click={openSettings}><Settings /></button>
       <button class="ghost icon-only" aria-label="最小化" use:tooltip={'最小化'} on:click={() => getCurrentWindow().minimize()}><Minus /></button>
       <button class="ghost icon-only close-action" aria-label="隐藏到托盘" use:tooltip={'隐藏到系统托盘'} on:click={() => getCurrentWindow().hide()}><X /></button>
     </div>
@@ -586,7 +611,7 @@
       </div>
       <div class="hub-heading-actions">
         {#if view !== 'trash'}
-          <button class:active={filtersOpen || filterCount > 0} on:click|stopPropagation={() => (filtersOpen = !filtersOpen)}>
+          <button class:active={filtersOpen || filterCount > 0} on:click|stopPropagation={() => { contextMenu = null; filtersOpen = !filtersOpen }}>
             <FolderIcon /><span>{filterCount ? `${folderFilterName}${selectedTag ? ` · #${selectedTag}` : ''}` : '筛选'}</span><ChevronDown />
           </button>
         {:else if trashNotes.length}

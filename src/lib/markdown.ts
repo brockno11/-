@@ -7,7 +7,6 @@ export interface MarkdownNode {
 }
 
 export interface MarkdownOptions {
-  title?: string
   assetUrl?: (assetPath: string, source: string) => string
 }
 
@@ -183,6 +182,5 @@ function serializeBlock(node: MarkdownNode, options: MarkdownOptions): string {
 
 export function serializeMarkdown(document: MarkdownNode, options: MarkdownOptions = {}): string {
   const blocks = (document.content ?? []).map((node) => serializeBlock(node, options))
-  if (options.title) blocks.unshift(`# ${escapeText(options.title)}`)
   return `${blocks.filter(Boolean).join('\n\n').trimEnd()}\n`
 }

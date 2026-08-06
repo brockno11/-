@@ -207,12 +207,17 @@ pub fn save_note(state: State<'_, AppState>, input: SaveNoteInput) -> Result<Not
     let mut db = lock_db(&state)?;
     let transaction = db.transaction()?;
     let timestamp = Utc::now().to_rfc3339();
+    let derived_title: String = input.plain_text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(80).collect())
+        .unwrap_or_else(|| "新便签".into());
     let changed = transaction.execute(
         "UPDATE notes SET title=?2, content_json=?3, plain_text=?4,
          updated_at=?5, pinned=?6, archived=?7 WHERE id=?1",
         params![
             input.id,
-            input.title,
+            derived_title,
             input.content.to_string(),
             input.plain_text,
             timestamp,
@@ -646,6 +651,13 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, AppError>
                 } else {
                     values.remove("alwaysOnTop");
                 }
+                if !values.contains_key("defaultNoteBackgroundOpacity") {
+                    if let Some(value) = values.remove("defaultNoteOpacity") {
+                        values.insert("defaultNoteBackgroundOpacity".into(), value);
+                    }
+                } else {
+                    values.remove("defaultNoteOpacity");
+                }
             }
             let merged = match (defaults, stored) {
                 (serde_json::Value::Object(mut base), serde_json::Value::Object(stored)) => {
@@ -668,8 +680,11 @@ pub fn save_settings(
     if !(9..=72).contains(&settings.default_font_size) {
         return Err(AppError::Invalid("默认字号必须在 9 到 72 之间".into()));
     }
-    if !(60..=100).contains(&settings.default_note_opacity) {
-        return Err(AppError::Invalid("默认透明度必须在 60% 到 100% 之间".into()));
+    if settings.default_note_background_opacity > 100 {
+        return Err(AppError::Invalid("默认背景透明度必须在 0% 到 100% 之间".into()));
+    }
+    if !(20..=100).contains(&settings.default_note_text_opacity) {
+        return Err(AppError::Invalid("默认文字透明度必须在 20% 到 100% 之间".into()));
     }
     if settings.hotkey.trim().is_empty() || !settings.hotkey.contains('+') {
         return Err(AppError::Invalid("全局快捷键必须是组合键".into()));
@@ -872,8 +887,7 @@ h1,h2,h3,table,blockquote,pre{{clear:both}}
 table{{border-collapse:collapse;width:100%;margin:14px 0}}td,th{{border:1px solid #cfc8ba;padding:7px 9px;text-align:left}}th{{background:#f5f1e7}}
 blockquote{{margin-left:0;padding-left:14px;border-left:3px solid #f1d887;color:#736e65}}
 @media print{{body{{margin:0;max-width:none}}}}
-</style></head><body><h1>{}</h1>{}</body></html>"#,
-        escape_html(&title),
+</style></head><body>{}</body></html>"#,
         escape_html(&title),
         rendered
     );
@@ -928,6 +942,7 @@ pub fn export_markdown(
 #[tauri::command]
 pub async fn export_pdf(
     app: tauri::AppHandle,
+    note_id: String,
     destination: String,
 ) -> Result<(), AppError> {
     use std::{sync::mpsc, time::Duration};
@@ -940,8 +955,8 @@ pub async fn export_pdf(
     use windows::core::{HSTRING, Interface};
 
     let webview = app
-        .get_webview_window("editor")
-        .ok_or_else(|| AppError::Other("找不到主编辑窗口".into()))?;
+        .get_webview_window(&format!("note-{note_id}"))
+        .ok_or_else(|| AppError::Other("找不到当前便签窗口".into()))?;
     let (sender, receiver) = mpsc::channel::<Result<(), String>>();
     webview
         .with_webview(move |platform| {
@@ -1012,7 +1027,7 @@ fn write_backup(state: &State<'_, AppState>, destination: &Path) -> Result<(), A
     }
     let manifest = BackupManifest {
         format: "qingjian-backup".into(),
-        schema_version: 4,
+        schema_version: 5,
         app_version: env!("CARGO_PKG_VERSION").into(),
         created_at: Utc::now().to_rfc3339(),
         files,
@@ -1076,7 +1091,7 @@ pub fn restore_backup(
         entry.read_to_string(&mut json)?;
         serde_json::from_str(&json)?
     };
-    if manifest.format != "qingjian-backup" || manifest.schema_version > 4 {
+    if manifest.format != "qingjian-backup" || manifest.schema_version > 5 {
         return Err(AppError::Invalid("该备份版本不受当前轻笺支持".into()));
     }
     let incoming_path = temp.path().join("incoming.db");
@@ -1092,7 +1107,7 @@ pub fn restore_backup(
     }
     let incoming = Connection::open(&incoming_path)?;
     let version: u32 = incoming.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > 4 {
+    if version > 5 {
         return Err(AppError::Invalid("备份数据库版本过新".into()));
     }
     drop(incoming);
@@ -1161,11 +1176,24 @@ pub fn restore_backup(
                 SELECT id,sha256,asset_path,mime,width,height,size_bytes,created_at
                 FROM incoming.attachments;"
         ))?;
-        if version >= 4 {
+        if version >= 5 {
             tx.execute_batch(&format!(
                 "INSERT {insert_mode} INTO note_window_state(
-                    note_id,mode,visible,always_on_top,opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
-                 ) SELECT note_id,mode,visible,always_on_top,opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+                    note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+                 ) SELECT note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+                   FROM incoming.note_window_state;
+                 INSERT {insert_mode} INTO note_window_geometry(
+                    note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
+                    work_area_width,work_area_height,scale_factor
+                 ) SELECT note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
+                          work_area_width,work_area_height,scale_factor
+                   FROM incoming.note_window_geometry;"
+            ))?;
+        } else if version >= 4 {
+            tx.execute_batch(&format!(
+                "INSERT {insert_mode} INTO note_window_state(
+                    note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
+                 ) SELECT note_id,mode,visible,always_on_top,opacity,100,locked,dock_edge,dock_offset,monitor_key,updated_at
                    FROM incoming.note_window_state;
                  INSERT {insert_mode} INTO note_window_geometry(
                     note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
@@ -1186,6 +1214,7 @@ pub fn restore_backup(
         }
         tx.commit()?;
         db.execute_batch("DETACH DATABASE incoming;")?;
+        crate::state::migrate_legacy_note_titles(&db)?;
     }
 
     for index in 0..archive.len() {

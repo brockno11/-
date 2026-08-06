@@ -67,11 +67,18 @@ describe('serializeMarkdown', () => {
           ],
         },
       ],
-    }, { title: '版本记录' })
+    })
 
-    expect(markdown).toContain('# 版本记录')
+    expect(markdown).not.toContain('# 版本记录')
     expect(markdown).toContain('![示意图](qingjian-asset:abc.png)')
     expect(markdown).toContain('| 名称 | 状态 |\n| --- | --- |\n| 轻笺 | 完成 |')
+  })
+
+  it('does not duplicate the derived title before the body', () => {
+    expect(serializeMarkdown({
+      type: 'doc',
+      content: [{ type: 'heading', attrs: { level: 1 }, content: [{ type: 'text', text: '版本记录' }] }],
+    })).toBe('# 版本记录\n')
   })
 
   it('keeps Markdown-looking plain paragraphs as plain text', () => {

@@ -10,7 +10,7 @@
   export let onClose: () => void
   export let onBackup: () => void
   export let onRestore: () => void
-  export let appVersion = '0.5.0'
+  export let appVersion = '0.6.0'
   export let checkingUpdate = false
   export let onCheckUpdate: () => void
 
@@ -103,15 +103,28 @@
 
       <label class="setting-row">
         <span class="setting-icon"><SunMoon /></span>
-        <span class="setting-copy"><strong>新便签默认透明度</strong><small>每张便签仍可单独调整，范围 60%–100%</small></span>
-        <input type="range" min="60" max="100" step="5" bind:value={draft.defaultNoteOpacity} />
-        <b>{draft.defaultNoteOpacity}%</b>
+        <span class="setting-copy"><strong>新便签默认背景</strong><small>只淡化便签纸张，不影响文字与按钮</small></span>
+        <input type="range" min="0" max="100" step="5" bind:value={draft.defaultNoteBackgroundOpacity} />
+        <b>{draft.defaultNoteBackgroundOpacity}%</b>
+      </label>
+
+      <label class="setting-row">
+        <span class="setting-icon"><Type /></span>
+        <span class="setting-copy"><strong>新便签默认文字</strong><small>正文透明度范围 20%–100%，图片与控件保持清晰</small></span>
+        <input type="range" min="20" max="100" step="5" bind:value={draft.defaultNoteTextOpacity} />
+        <b>{draft.defaultNoteTextOpacity}%</b>
       </label>
 
       <div class="setting-row">
         <span class="setting-icon"><Keyboard /></span>
         <span class="setting-copy"><strong>解锁快捷键</strong><small>锁定后完全鼠标穿透；按 Ctrl+Alt+L 或使用托盘菜单恢复</small></span>
         <kbd>Ctrl+Alt+L</kbd>
+      </div>
+
+      <div class="setting-row">
+        <span class="setting-icon"><SunMoon /></span>
+        <span class="setting-copy"><strong>可见度救援</strong><small>按 Ctrl+Alt+O 或使用托盘，将所有便签恢复为背景 85%、文字 100%</small></span>
+        <kbd>Ctrl+Alt+O</kbd>
       </div>
 
       <div class="setting-row">

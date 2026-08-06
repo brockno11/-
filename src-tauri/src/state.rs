@@ -37,6 +37,92 @@ fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool, AppErr
     Ok(names.iter().any(|name| name == column))
 }
 
+fn derived_title(plain_text: &str) -> String {
+    plain_text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(80).collect())
+        .unwrap_or_else(|| "新便签".into())
+}
+
+fn node_text(node: &serde_json::Value) -> String {
+    let own = node.get("text").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let children = node.get("content").and_then(serde_json::Value::as_array)
+        .map(|items| items.iter().map(node_text).collect::<String>())
+        .unwrap_or_default();
+    format!("{own}{children}")
+}
+
+fn migrate_note_title(title: &str, content_json: &str, plain_text: &str) -> (String, String, String) {
+    let old_title = title.trim();
+    let mut document = serde_json::from_str::<serde_json::Value>(content_json)
+        .unwrap_or_else(|_| serde_json::json!({ "type": "doc", "content": [] }));
+    if !document.is_object() {
+        document = serde_json::json!({ "type": "doc", "content": [] });
+    }
+    if document.get("content").and_then(serde_json::Value::as_array).is_none() {
+        document["content"] = serde_json::json!([]);
+    }
+
+    let first_block_matches = document["content"].as_array()
+        .and_then(|items| items.first())
+        .map(node_text)
+        .map(|value| value.trim() == old_title)
+        .unwrap_or(false);
+    let body_title = derived_title(plain_text);
+    let should_insert = !old_title.is_empty()
+        && old_title != "新便签"
+        && old_title != body_title
+        && !first_block_matches;
+
+    let migrated_plain_text = if should_insert {
+        if plain_text.trim().is_empty() { old_title.to_string() }
+        else { format!("{old_title}\n{plain_text}") }
+    } else if first_block_matches && body_title != old_title {
+        if plain_text.trim().is_empty() { old_title.to_string() }
+        else { format!("{old_title}\n{plain_text}") }
+    } else {
+        plain_text.to_string()
+    };
+
+    if should_insert {
+        let heading = serde_json::json!({
+            "type": "heading",
+            "attrs": { "level": 1 },
+            "content": [{ "type": "text", "text": old_title }]
+        });
+        document["content"].as_array_mut().expect("content array").insert(0, heading);
+    }
+
+    (
+        derived_title(&migrated_plain_text),
+        serde_json::to_string(&document).unwrap_or_else(|_| content_json.to_string()),
+        migrated_plain_text,
+    )
+}
+
+pub(crate) fn migrate_legacy_note_titles(db: &Connection) -> Result<(), AppError> {
+    let notes = {
+        let mut statement = db.prepare(
+            "SELECT id,title,content_json,plain_text FROM notes ORDER BY rowid",
+        )?;
+        let rows = statement.query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+        )))?.collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (id, title, content_json, plain_text) in notes {
+        let (title, content_json, plain_text) = migrate_note_title(&title, &content_json, &plain_text);
+        db.execute(
+            "UPDATE notes SET title=?2,content_json=?3,plain_text=?4 WHERE id=?1",
+            rusqlite::params![id, title, content_json, plain_text],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn migrate(db: &Connection) -> Result<(), AppError> {
     db.execute_batch(
         r#"
@@ -194,6 +280,16 @@ pub(crate) fn migrate(db: &Connection) -> Result<(), AppError> {
             }
         }
     }
+    if version < 5 {
+        if !has_column(db, "note_window_state", "text_opacity")? {
+            db.execute_batch(
+                "ALTER TABLE note_window_state ADD COLUMN text_opacity INTEGER NOT NULL DEFAULT 100;",
+            )?;
+        }
+
+        migrate_legacy_note_titles(db)?;
+        db.execute_batch("PRAGMA user_version = 5;")?;
+    }
     Ok(())
 }
 
@@ -224,7 +320,7 @@ mod tests {
         let title: String = db
             .query_row("SELECT title FROM notes WHERE id='one'", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(title, "旧便签");
         assert!(has_column(&db, "notes", "folder_id").unwrap());
         assert!(has_column(&db, "notes", "sort_order").unwrap());
@@ -240,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_starts_at_schema_four() {
+    fn fresh_database_starts_at_schema_five() {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let version: u32 = db.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
@@ -254,8 +350,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(tables, 5);
+        assert!(has_column(&db, "note_window_state", "text_opacity").unwrap());
     }
 
     #[test]
@@ -296,5 +393,48 @@ mod tests {
         let states: i64 = db.query_row("SELECT COUNT(*) FROM note_window_state", [], |row| row.get(0)).unwrap();
         let geometries: i64 = db.query_row("SELECT COUNT(*) FROM note_window_geometry", [], |row| row.get(0)).unwrap();
         assert_eq!((states, geometries), (0, 0));
+    }
+
+    #[test]
+    fn v4_migration_inserts_a_distinct_legacy_title_once() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        db.execute_batch(
+            r#"INSERT INTO notes(id,title,content_json,plain_text,created_at,updated_at,pinned,archived,sort_order)
+               VALUES('legacy','旧标题','{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"正文首行"}]}]}','正文首行','now','now',0,0,1);
+               PRAGMA user_version=4;"#,
+        ).unwrap();
+        migrate(&db).unwrap();
+        let (title, content, plain): (String, String, String) = db.query_row(
+            "SELECT title,content_json,plain_text FROM notes WHERE id='legacy'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(title, "旧标题");
+        assert_eq!(plain, "旧标题\n正文首行");
+        assert_eq!(content.matches("旧标题").count(), 1);
+
+        db.execute_batch("PRAGMA user_version=4;").unwrap();
+        migrate(&db).unwrap();
+        let content: String = db.query_row(
+            "SELECT content_json FROM notes WHERE id='legacy'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(content.matches("旧标题").count(), 1);
+    }
+
+    #[test]
+    fn v4_migration_keeps_matching_or_empty_titles_out_of_the_body() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        db.execute_batch(
+            r#"INSERT INTO notes(id,title,content_json,plain_text,created_at,updated_at,pinned,archived,sort_order)
+               VALUES('same','正文首行','{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"正文首行"}]}]}','正文首行','now','now',0,0,1),
+                     ('empty','新便签','{"type":"doc","content":[{"type":"image"}]}','','now','now',0,0,2);
+               PRAGMA user_version=4;"#,
+        ).unwrap();
+        migrate(&db).unwrap();
+        let same: String = db.query_row("SELECT content_json FROM notes WHERE id='same'", [], |row| row.get(0)).unwrap();
+        let empty: String = db.query_row("SELECT title FROM notes WHERE id='empty'", [], |row| row.get(0)).unwrap();
+        assert_eq!(same.matches("正文首行").count(), 1);
+        assert_eq!(empty, "新便签");
     }
 }

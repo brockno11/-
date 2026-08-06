@@ -24,12 +24,13 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show_notes = MenuItem::with_id(app, "show_notes", "显示全部便签", true, None::<&str>)?;
     let hide_notes = MenuItem::with_id(app, "hide_notes", "隐藏全部便签", true, None::<&str>)?;
     let unlock_notes = MenuItem::with_id(app, "unlock_notes", "解锁全部便签  Ctrl+Alt+L", true, None::<&str>)?;
+    let restore_visibility = MenuItem::with_id(app, "restore_visibility", "恢复便签可见度  Ctrl+Alt+O", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置与开机自启", true, None::<&str>)?;
     let check_update = MenuItem::with_id(app, "check_update", "检查更新", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "退出轻笺", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[
-        &show, &new_note, &show_notes, &hide_notes, &unlock_notes,
+        &show, &new_note, &show_notes, &hide_notes, &unlock_notes, &restore_visibility,
         &settings, &check_update, &separator, &quit,
     ])?;
 
@@ -43,6 +44,7 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "show_notes" => windows::show_all(app),
             "hide_notes" => windows::hide_all(app),
             "unlock_notes" => windows::unlock_all(app),
+            "restore_visibility" => windows::restore_visibility(app),
             "settings" => {
                 windows::show_hub(app);
                 let _ = app.emit("qingjian://settings", ());
@@ -142,6 +144,7 @@ pub fn run() {
             windows::collapse_docked_note_window,
             windows::expand_docked_note_window,
             windows::unlock_all_note_windows,
+            windows::restore_all_note_visibility,
         ])
         .run(tauri::generate_context!())
         .expect("轻笺启动失败");

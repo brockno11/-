@@ -16,5 +16,7 @@ describe('DEFAULT_SETTINGS', () => {
     expect(DEFAULT_SETTINGS.startOnBoot).toBe(false)
     expect(DEFAULT_SETTINGS.theme).toBe('system')
     expect(DEFAULT_SETTINGS.checkUpdatesOnStartup).toBe(true)
+    expect(DEFAULT_SETTINGS.defaultNoteBackgroundOpacity).toBe(100)
+    expect(DEFAULT_SETTINGS.defaultNoteTextOpacity).toBe(100)
   })
 })

@@ -67,7 +67,9 @@ pub struct AppSettings {
     pub sidebar_collapsed: bool,
     #[serde(alias = "alwaysOnTop")]
     pub default_note_always_on_top: bool,
-    pub default_note_opacity: u8,
+    #[serde(alias = "defaultNoteOpacity")]
+    pub default_note_background_opacity: u8,
+    pub default_note_text_opacity: u8,
     pub restore_note_windows_on_boot: bool,
     pub check_updates_on_startup: bool,
     pub window_layout: String,
@@ -85,7 +87,8 @@ impl Default for AppSettings {
             default_font_size: 16,
             sidebar_collapsed: false,
             default_note_always_on_top: false,
-            default_note_opacity: 100,
+            default_note_background_opacity: 100,
+            default_note_text_opacity: 100,
             restore_note_windows_on_boot: true,
             check_updates_on_startup: true,
             window_layout: "integrated".into(),
@@ -120,6 +123,13 @@ mod tests {
         settings.hotkey_action = "hub".into();
         assert_eq!(settings.migrate_legacy().hotkey_action, "last-note");
     }
+
+    #[test]
+    fn legacy_opacity_becomes_background_only() {
+        let settings: AppSettings = serde_json::from_str(r#"{"defaultNoteOpacity":70}"#).unwrap();
+        assert_eq!(settings.default_note_background_opacity, 70);
+        assert_eq!(settings.default_note_text_opacity, 100);
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -137,7 +147,8 @@ pub struct NoteWindowState {
     pub mode: String,
     pub visible: bool,
     pub always_on_top: bool,
-    pub opacity: u8,
+    pub background_opacity: u8,
+    pub text_opacity: u8,
     pub locked: bool,
     pub dock_edge: Option<String>,
     pub dock_offset: f64,

@@ -5,6 +5,7 @@ export type HotkeyWindowScope = 'editor' | 'both'
 export type HotkeyAction = 'last-note' | 'new-note'
 export type NoteWindowMode = 'capsule' | 'card' | 'editor'
 export type DockEdge = 'left' | 'right' | 'top' | 'bottom' | null
+export type OpacityLayer = 'background' | 'text'
 
 export interface Tag {
   id: string
@@ -44,7 +45,8 @@ export interface NoteWindowState {
   mode: NoteWindowMode
   visible: boolean
   alwaysOnTop: boolean
-  opacity: number
+  backgroundOpacity: number
+  textOpacity: number
   locked: boolean
   dockEdge: DockEdge
   dockOffset: number
@@ -78,7 +80,8 @@ export interface AppSettings {
   defaultFontSize: number
   sidebarCollapsed: boolean
   defaultNoteAlwaysOnTop: boolean
-  defaultNoteOpacity: number
+  defaultNoteBackgroundOpacity: number
+  defaultNoteTextOpacity: number
   restoreNoteWindowsOnBoot: boolean
   checkUpdatesOnStartup: boolean
   windowLayout: WindowLayout
@@ -118,7 +121,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultFontSize: 16,
   sidebarCollapsed: false,
   defaultNoteAlwaysOnTop: false,
-  defaultNoteOpacity: 100,
+  defaultNoteBackgroundOpacity: 100,
+  defaultNoteTextOpacity: 100,
   restoreNoteWindowsOnBoot: true,
   checkUpdatesOnStartup: true,
   windowLayout: 'integrated',

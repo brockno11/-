@@ -57,6 +57,15 @@ function writeMockNotes(notes: Note[]) {
   localStorage.setItem(MOCK_NOTES_KEY, JSON.stringify(notes))
 }
 
+function normalizeMockWindowState(value: Record<string, unknown>): NoteWindowState {
+  return {
+    ...(value as unknown as NoteWindowState),
+    backgroundOpacity: Math.max(0, Math.min(100,
+      Number(value.backgroundOpacity ?? value.opacity ?? 100))),
+    textOpacity: Math.max(20, Math.min(100, Number(value.textOpacity ?? 100))),
+  }
+}
+
 export const backend = {
   isDesktop: inTauri,
 
@@ -240,7 +249,9 @@ export const backend = {
       ...DEFAULT_SETTINGS,
       ...stored,
       defaultNoteAlwaysOnTop: stored.defaultNoteAlwaysOnTop ?? stored.alwaysOnTop ?? false,
-      defaultNoteOpacity: Math.max(60, Math.min(100, stored.defaultNoteOpacity ?? 100)),
+      defaultNoteBackgroundOpacity: Math.max(0, Math.min(100,
+        stored.defaultNoteBackgroundOpacity ?? stored.defaultNoteOpacity ?? 100)),
+      defaultNoteTextOpacity: Math.max(20, Math.min(100, stored.defaultNoteTextOpacity ?? 100)),
       hotkeyAction: normalizeHotkeyAction(stored.hotkeyAction),
     }
   },
@@ -256,7 +267,8 @@ export const backend = {
     const state: NoteWindowState = {
       noteId, mode: preferredMode ?? 'card', visible: true,
       alwaysOnTop: DEFAULT_SETTINGS.defaultNoteAlwaysOnTop,
-      opacity: DEFAULT_SETTINGS.defaultNoteOpacity, locked: false,
+      backgroundOpacity: DEFAULT_SETTINGS.defaultNoteBackgroundOpacity,
+      textOpacity: DEFAULT_SETTINGS.defaultNoteTextOpacity, locked: false,
       dockEdge: null, dockOffset: 0, monitorKey: null, updatedAt: now(),
     }
     localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state))
@@ -271,14 +283,14 @@ export const backend = {
   async getNoteWindowState(noteId: string): Promise<NoteWindowState> {
     if (inTauri) return invoke('get_note_window_state', { noteId })
     const stored = localStorage.getItem(`qingjian.mock.window.${noteId}`)
-    if (stored) return JSON.parse(stored)
+    if (stored) return normalizeMockWindowState(JSON.parse(stored))
     return (await this.openNoteWindow(noteId, 'card'))!
   },
 
   async listVisibleNoteWindows(): Promise<NoteWindowState[]> {
     if (inTauri) return invoke('list_visible_note_windows')
     return Object.keys(localStorage).filter((key) => key.startsWith('qingjian.mock.window.'))
-      .map((key) => JSON.parse(localStorage.getItem(key)!)).filter((state) => state.visible)
+      .map((key) => normalizeMockWindowState(JSON.parse(localStorage.getItem(key)!))).filter((state) => state.visible)
   },
 
   async setNoteWindowMode(noteId: string, mode: NoteWindowMode): Promise<NoteWindowState> {
@@ -293,9 +305,11 @@ export const backend = {
     localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state)); return state
   },
 
-  async setNoteWindowOpacity(noteId: string, opacity: number): Promise<NoteWindowState> {
-    if (inTauri) return invoke('set_note_window_opacity', { noteId, opacity })
-    const state = await this.getNoteWindowState(noteId); state.opacity = Math.max(60, Math.min(100, opacity))
+  async setNoteWindowOpacity(noteId: string, layer: 'background' | 'text', opacity: number): Promise<NoteWindowState> {
+    if (inTauri) return invoke('set_note_window_opacity', { noteId, layer, opacity })
+    const state = await this.getNoteWindowState(noteId)
+    if (layer === 'background') state.backgroundOpacity = Math.max(0, Math.min(100, opacity))
+    else state.textOpacity = Math.max(20, Math.min(100, opacity))
     localStorage.setItem(`qingjian.mock.window.${noteId}`, JSON.stringify(state)); return state
   },
 
@@ -330,6 +344,16 @@ export const backend = {
 
   async unlockAllNoteWindows(): Promise<void> {
     if (inTauri) return invoke('unlock_all_note_windows')
+  },
+
+  async restoreAllNoteVisibility(): Promise<void> {
+    if (inTauri) return invoke('restore_all_note_visibility')
+    for (const key of Object.keys(localStorage).filter((item) => item.startsWith('qingjian.mock.window.'))) {
+      const state = JSON.parse(localStorage.getItem(key)!) as NoteWindowState
+      state.backgroundOpacity = 85
+      state.textOpacity = 100
+      localStorage.setItem(key, JSON.stringify(state))
+    }
   },
 
   async showHubWindow(): Promise<void> {
@@ -383,8 +407,8 @@ export const backend = {
     throw new Error('请在桌面版中使用导出功能')
   },
 
-  async exportPdf(destination: string): Promise<void> {
-    if (inTauri) return invoke('export_pdf', { destination })
+  async exportPdf(noteId: string, destination: string): Promise<void> {
+    if (inTauri) return invoke('export_pdf', { noteId, destination })
     window.print()
   },
 
