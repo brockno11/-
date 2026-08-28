@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OptionalExtension};
+use chrono::Utc;
 use std::{
     fs,
     path::PathBuf,
@@ -16,17 +17,51 @@ pub struct AppState {
 impl AppState {
     pub fn initialize(data_dir: PathBuf) -> Result<Self, AppError> {
         let assets_dir = data_dir.join("assets");
+        let backups_dir = data_dir.join("backups");
         fs::create_dir_all(&assets_dir)?;
-        fs::create_dir_all(data_dir.join("backups"))?;
+        fs::create_dir_all(&backups_dir)?;
         let db_path = data_dir.join("qingjian.db");
-        let connection = Connection::open(db_path)?;
+        let connection = Connection::open(&db_path)?;
+        let previous_version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if db_path.exists() && previous_version > 0 && previous_version < 5 {
+            connection.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+            let backup = backups_dir.join(format!(
+                "迁移前-{}-v{}.db", Utc::now().format("%Y%m%d-%H%M%S"), previous_version,
+            ));
+            fs::copy(&db_path, backup)?;
+        }
         migrate(&connection)?;
+        let health: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+        if health != "ok" {
+            return Err(AppError::Other(format!("本地数据库健康检查失败：{health}")));
+        }
+        create_daily_snapshot(&connection, &db_path, &backups_dir)?;
         Ok(Self {
             db: Mutex::new(connection),
             data_dir,
             assets_dir,
         })
     }
+}
+
+fn create_daily_snapshot(db: &Connection, db_path: &std::path::Path, backups_dir: &std::path::Path) -> Result<(), AppError> {
+    if !db_path.exists() { return Ok(()) }
+    let snapshot = backups_dir.join(format!("auto-{}.db", Utc::now().format("%Y%m%d")));
+    if !snapshot.exists() {
+        db.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+        fs::copy(db_path, &snapshot)?;
+    }
+    let mut snapshots = fs::read_dir(backups_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.file_name().and_then(|name| name.to_str())
+            .map(|name| name.starts_with("auto-") && name.ends_with(".db"))
+            .unwrap_or(false))
+        .collect::<Vec<_>>();
+    snapshots.sort();
+    let remove_count = snapshots.len().saturating_sub(7);
+    for stale in snapshots.into_iter().take(remove_count) { fs::remove_file(stale)?; }
+    Ok(())
 }
 
 fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool, AppError> {
@@ -436,5 +471,44 @@ mod tests {
         let empty: String = db.query_row("SELECT title FROM notes WHERE id='empty'", [], |row| row.get(0)).unwrap();
         assert_eq!(same.matches("正文首行").count(), 1);
         assert_eq!(empty, "新便签");
+    }
+
+    #[test]
+    fn startup_creates_a_healthy_daily_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(directory.path().to_path_buf()).unwrap();
+        let snapshots = fs::read_dir(directory.path().join("backups"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("auto-"))
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots.len(), 1);
+        let snapshot = Connection::open(snapshots[0].path()).unwrap();
+        let health: String = snapshot.query_row("PRAGMA quick_check(1)", [], |row| row.get(0)).unwrap();
+        assert_eq!(health, "ok");
+        drop(state);
+    }
+
+    #[test]
+    fn daily_snapshots_keep_only_the_latest_seven_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let backups = directory.path().join("backups");
+        fs::create_dir_all(&backups).unwrap();
+        let db_path = directory.path().join("qingjian.db");
+        let db = Connection::open(&db_path).unwrap();
+        migrate(&db).unwrap();
+        for day in 1..=9 {
+            fs::write(backups.join(format!("auto-202501{day:02}.db")), b"old").unwrap();
+        }
+        create_daily_snapshot(&db, &db_path, &backups).unwrap();
+        let names = fs::read_dir(&backups).unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("auto-"))
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 7);
+        assert!(!backups.join("auto-20250101.db").exists());
+        assert!(!backups.join("auto-20250102.db").exists());
+        assert!(!backups.join("auto-20250103.db").exists());
     }
 }

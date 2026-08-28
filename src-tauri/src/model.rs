@@ -61,9 +61,13 @@ pub struct SaveNoteInput {
 pub struct AppSettings {
     pub hotkey: String,
     pub start_on_boot: bool,
-    pub theme: String,
+    #[serde(alias = "theme")]
+    pub theme_id: String,
     pub default_font_family: String,
     pub default_font_size: u16,
+    pub default_line_height: f32,
+    pub capsule_display: String,
+    pub auto_hide_at_screen_edge: bool,
     pub sidebar_collapsed: bool,
     #[serde(alias = "alwaysOnTop")]
     pub default_note_always_on_top: bool,
@@ -82,9 +86,12 @@ impl Default for AppSettings {
         Self {
             hotkey: "Ctrl+Alt+N".into(),
             start_on_boot: false,
-            theme: "system".into(),
+            theme_id: "default-light".into(),
             default_font_family: "Microsoft YaHei UI".into(),
             default_font_size: 16,
+            default_line_height: 1.55,
+            capsule_display: "comfortable".into(),
+            auto_hide_at_screen_edge: true,
             sidebar_collapsed: false,
             default_note_always_on_top: false,
             default_note_background_opacity: 100,
@@ -100,6 +107,9 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn migrate_legacy(mut self) -> Self {
+        if self.theme_id == "light" {
+            self.theme_id = "default-light".into();
+        }
         if self.hotkey_action == "hub" {
             self.hotkey_action = "last-note".into();
         }
@@ -115,6 +125,10 @@ mod tests {
     fn hotkey_defaults_to_the_last_note() {
         assert_eq!(AppSettings::default().hotkey_action, "last-note");
         assert!(AppSettings::default().check_updates_on_startup);
+        assert_eq!(AppSettings::default().capsule_display, "comfortable");
+        assert!(AppSettings::default().auto_hide_at_screen_edge);
+        assert_eq!(AppSettings::default().default_line_height, 1.55);
+        assert_eq!(AppSettings::default().theme_id, "default-light");
     }
 
     #[test]
@@ -122,6 +136,12 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.hotkey_action = "hub".into();
         assert_eq!(settings.migrate_legacy().hotkey_action, "last-note");
+    }
+
+    #[test]
+    fn legacy_light_theme_is_migrated() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(settings.migrate_legacy().theme_id, "default-light");
     }
 
     #[test]

@@ -26,9 +26,11 @@
   export let content: Record<string, unknown>
   export let defaultFontFamily = 'Microsoft YaHei UI'
   export let defaultFontSize = 16
+  export let defaultLineHeight = 1.55
   export let onChange: (content: Record<string, unknown>, plainText: string) => void
   export let onReady: (editor: Editor) => void
   export let onSelectionChange: () => void
+  export let onTextContextMenu: (event: MouseEvent) => void = () => undefined
   export let onError: (message: string) => void
 
   let host: HTMLDivElement
@@ -248,7 +250,15 @@
         attributes: {
           class: 'note-prosemirror',
           spellcheck: 'true',
-          style: `font-family:${defaultFontFamily};font-size:${defaultFontSize}px`,
+          style: `font-family:${defaultFontFamily};font-size:${defaultFontSize}px;line-height:${defaultLineHeight}`,
+        },
+        handleDOMEvents: {
+          contextmenu: (view, event) => {
+            if (view.state.selection.empty || view.state.selection instanceof NodeSelection) return false
+            event.preventDefault()
+            onTextContextMenu(event)
+            return true
+          },
         },
         handleClickOn: (view, _position, node, nodePosition, _event) => {
           if (node.type.name !== 'image') return false
@@ -340,7 +350,7 @@
           ...editor.options.editorProps.attributes,
           class: 'note-prosemirror',
           spellcheck: 'true',
-          style: `font-family:${defaultFontFamily};font-size:${defaultFontSize}px`,
+          style: `font-family:${defaultFontFamily};font-size:${defaultFontSize}px;line-height:${defaultLineHeight}`,
         },
       },
     })

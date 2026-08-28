@@ -4,6 +4,9 @@ src-tauri/target/
 src-tauri/target-redesign/
 .vite/
 coverage/
+release/current/
+*-qa.png
+debug-standalone-startup.png
 *.log
 *.pdb
 *.ilk

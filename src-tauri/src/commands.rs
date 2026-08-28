@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
@@ -302,6 +302,72 @@ pub fn restore_note(state: State<'_, AppState>, id: String) -> Result<(), AppErr
     )?;
     if changed == 0 {
         return Err(AppError::Invalid("回收站中找不到该便签".into()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn batch_note_action(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    action: String,
+) -> Result<(), AppError> {
+    let ids = ids.into_iter().collect::<BTreeSet<_>>();
+    if ids.is_empty() { return Ok(()) }
+    if ids.iter().any(|id| Uuid::parse_str(id).is_err()) {
+        return Err(AppError::Invalid("便签编号无效".into()));
+    }
+    if !matches!(action.as_str(), "trash" | "restore" | "archive" | "unarchive" | "permanent-delete") {
+        return Err(AppError::Invalid("批量操作无效".into()));
+    }
+
+    let mut db = lock_db(&state)?;
+    let transaction = db.transaction()?;
+    let timestamp = Utc::now().to_rfc3339();
+    apply_batch_note_action(&transaction, &ids, &action, &timestamp)?;
+    transaction.commit()?;
+    drop(db);
+    if matches!(action.as_str(), "trash" | "archive" | "permanent-delete") {
+        for id in ids { crate::windows::hide_and_destroy_note_window(&app, &id); }
+    }
+    Ok(())
+}
+
+fn apply_batch_note_action(
+    transaction: &rusqlite::Transaction<'_>,
+    ids: &BTreeSet<String>,
+    action: &str,
+    timestamp: &str,
+) -> Result<(), AppError> {
+    for id in ids {
+        let changed = match action {
+            "trash" => transaction.execute(
+                "UPDATE notes SET trashed_at=?2, pinned=0 WHERE id=?1 AND trashed_at IS NULL",
+                params![id, timestamp],
+            )?,
+            "restore" => transaction.execute(
+                "UPDATE notes SET trashed_at=NULL WHERE id=?1 AND trashed_at IS NOT NULL", [id],
+            )?,
+            "archive" => transaction.execute(
+                "UPDATE notes SET archived=1, updated_at=?2 WHERE id=?1 AND trashed_at IS NULL",
+                params![id, timestamp],
+            )?,
+            "unarchive" => transaction.execute(
+                "UPDATE notes SET archived=0, updated_at=?2 WHERE id=?1 AND trashed_at IS NULL",
+                params![id, timestamp],
+            )?,
+            "permanent-delete" => transaction.execute(
+                "DELETE FROM notes WHERE id=?1 AND trashed_at IS NOT NULL", [id],
+            )?,
+            _ => unreachable!(),
+        };
+        if changed == 0 {
+            return Err(AppError::Invalid(format!("便签状态已变化，批量操作已取消：{id}")));
+        }
+        if matches!(action, "trash" | "archive" | "permanent-delete") {
+            remove_note_from_workspace(transaction, id)?;
+        }
     }
     Ok(())
 }
@@ -651,6 +717,13 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, AppError>
                 } else {
                     values.remove("alwaysOnTop");
                 }
+                if !values.contains_key("themeId") {
+                    if let Some(value) = values.remove("theme") {
+                        values.insert("themeId".into(), value);
+                    }
+                } else {
+                    values.remove("theme");
+                }
                 if !values.contains_key("defaultNoteBackgroundOpacity") {
                     if let Some(value) = values.remove("defaultNoteOpacity") {
                         values.insert("defaultNoteBackgroundOpacity".into(), value);
@@ -680,6 +753,15 @@ pub fn save_settings(
     if !(9..=72).contains(&settings.default_font_size) {
         return Err(AppError::Invalid("默认字号必须在 9 到 72 之间".into()));
     }
+    if !(1.3..=1.9).contains(&settings.default_line_height) {
+        return Err(AppError::Invalid("默认行距必须在 1.3 到 1.9 之间".into()));
+    }
+    if !matches!(settings.capsule_display.as_str(), "compact" | "comfortable") {
+        return Err(AppError::Invalid("胶囊展示方式无效".into()));
+    }
+    if !matches!(settings.theme_id.as_str(), "default-light" | "system" | "dark") {
+        return Err(AppError::Invalid("主题设置无效".into()));
+    }
     if settings.default_note_background_opacity > 100 {
         return Err(AppError::Invalid("默认背景透明度必须在 0% 到 100% 之间".into()));
     }
@@ -688,6 +770,10 @@ pub fn save_settings(
     }
     if settings.hotkey.trim().is_empty() || !settings.hotkey.contains('+') {
         return Err(AppError::Invalid("全局快捷键必须是组合键".into()));
+    }
+    if ["Ctrl+Alt+H", "Ctrl+Alt+L", "Ctrl+Alt+O"]
+        .iter().any(|reserved| settings.hotkey.eq_ignore_ascii_case(reserved)) {
+        return Err(AppError::Invalid("该组合是轻笺的固定救援快捷键".into()));
     }
     if !matches!(settings.window_layout.as_str(), "integrated" | "separate") {
         return Err(AppError::Invalid("窗口布局设置无效".into()));
@@ -1291,5 +1377,36 @@ mod tests {
             ordered,
             vec![("b".into(), 1), ("a".into(), 2), ("c".into(), 3)]
         );
+    }
+
+    #[test]
+    fn batch_action_rolls_back_every_note_when_one_state_is_stale() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE notes(
+                id TEXT PRIMARY KEY, trashed_at TEXT, pinned INTEGER NOT NULL,
+                archived INTEGER NOT NULL, updated_at TEXT NOT NULL
+             );
+             CREATE TABLE workspace_state(id INTEGER PRIMARY KEY, json TEXT NOT NULL);
+             INSERT INTO workspace_state VALUES(1, '{\"openNoteIds\":[],\"activeNoteId\":null}');",
+        ).unwrap();
+        let first = Uuid::new_v4().to_string();
+        let stale = Uuid::new_v4().to_string();
+        db.execute(
+            "INSERT INTO notes VALUES(?1,NULL,0,0,'now')", [&first],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO notes VALUES(?1,'already-trashed',0,0,'now')", [&stale],
+        ).unwrap();
+
+        let ids = BTreeSet::from([first.clone(), stale]);
+        let transaction = db.transaction().unwrap();
+        assert!(apply_batch_note_action(&transaction, &ids, "trash", "later").is_err());
+        drop(transaction);
+
+        let trashed_at: Option<String> = db.query_row(
+            "SELECT trashed_at FROM notes WHERE id=?1", [&first], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(trashed_at, None);
     }
 }

@@ -1,8 +1,7 @@
 <script lang="ts">
-  import {
-    X, Keyboard, SunMoon, Rocket, Download, Upload, MousePointerClick, Pin, Type, RefreshCw,
-  } from 'lucide-svelte'
-  import type { AppSettings, Theme } from '../lib/types'
+  import { ArrowLeft, ChevronRight, X } from 'lucide-svelte'
+  import type { AppSettings } from '../lib/types'
+  import { isReservedGlobalHotkey } from '../lib/types'
   import { tooltip } from '../lib/tooltip'
 
   export let settings: AppSettings
@@ -10,14 +9,55 @@
   export let onClose: () => void
   export let onBackup: () => void
   export let onRestore: () => void
-  export let appVersion = '0.6.0'
+  export let appVersion = '0.7.0'
   export let checkingUpdate = false
   export let onCheckUpdate: () => void
 
+  type Section = 'general' | 'note' | 'shortcut' | 'data' | 'about' | 'advanced'
+  const sections: Array<{ id: Section; label: string; hint: string }> = [
+    { id: 'general', label: '常规', hint: '主题与启动行为' },
+    { id: 'note', label: '便签外观', hint: '文字与默认样式' },
+    { id: 'shortcut', label: '快捷键', hint: '唤起与救援操作' },
+    { id: 'data', label: '数据与备份', hint: '导出和恢复本地数据' },
+    { id: 'about', label: '关于与更新', hint: '版本和联网说明' },
+    { id: 'advanced', label: '高级', hint: '窗口停靠与可见性' },
+  ]
+
+  let narrow = window.innerWidth <= 520
+  let active: Section | null = narrow ? null : 'general'
   let draft = structuredClone(settings)
+  let persisted = structuredClone(settings)
   let saving = false
+  let pendingCommit = false
+  let saved = false
   let capturing = false
   let error = ''
+  let savedTimer: ReturnType<typeof setTimeout> | undefined
+
+  async function commit() {
+    if (saving) { pendingCommit = true; return }
+    if (isReservedGlobalHotkey(draft.hotkey)) {
+      error = `${draft.hotkey} 是轻笺的固定救援快捷键，请换一个组合`
+      draft = structuredClone(persisted)
+      return
+    }
+    const candidate = structuredClone(draft)
+    saving = true
+    error = ''
+    try {
+      await onSave(candidate)
+      persisted = candidate
+      saved = true
+      clearTimeout(savedTimer)
+      savedTimer = setTimeout(() => (saved = false), 1600)
+    } catch (reason) {
+      draft = structuredClone(persisted)
+      error = reason instanceof Error ? reason.message : '设置保存失败，已恢复原值'
+    } finally {
+      saving = false
+      if (pendingCommit) { pendingCommit = false; void commit() }
+    }
+  }
 
   function captureHotkey(event: KeyboardEvent) {
     if (!capturing) return
@@ -29,167 +69,80 @@
     if (event.altKey) modifiers.push('Alt')
     if (event.shiftKey) modifiers.push('Shift')
     if (event.metaKey) modifiers.push('Super')
-    if (!modifiers.length) {
-      error = '快捷键至少需要一个 Ctrl、Alt、Shift 或 Win 修饰键'
-      return
-    }
+    if (!modifiers.length) { error = '快捷键至少需要一个 Ctrl、Alt、Shift 或 Win 修饰键'; return }
     const key = event.key.length === 1 ? event.key.toUpperCase() : event.key
-    draft.hotkey = [...modifiers, key].join('+')
+    const hotkey = [...modifiers, key].join('+')
+    if (isReservedGlobalHotkey(hotkey)) { error = `${hotkey} 是轻笺的固定救援快捷键，请换一个组合`; return }
+    draft.hotkey = hotkey
     capturing = false
     error = ''
+    void commit()
   }
 
-  async function save() {
-    saving = true
-    error = ''
-    try {
-      await onSave(draft)
-      onClose()
-    } catch (reason) {
-      error = reason instanceof Error ? reason.message : '设置保存失败'
-    } finally {
-      saving = false
-    }
+  function updateLayout() {
+    const nextNarrow = window.innerWidth <= 520
+    if (!nextNarrow && active === null) active = 'general'
+    narrow = nextNarrow
   }
 </script>
 
-<svelte:window on:keydown={captureHotkey} />
+<svelte:window on:keydown={captureHotkey} on:resize={updateLayout} />
 
-<div class="modal-backdrop" role="presentation" on:mousedown={(event) => event.target === event.currentTarget && onClose()}>
-  <div class="settings-modal" role="dialog" aria-modal="true" aria-label="轻笺设置">
-    <header>
-      <div>
-        <span class="eyebrow">QINGJIAN</span>
-        <h2>设置</h2>
-      </div>
+<div class="modal-backdrop settings-backdrop" role="presentation">
+  <div class="settings-modal settings-page" role="dialog" aria-modal="true" aria-label="轻笺设置">
+    <header class="settings-page-header">
+      <div><h2>设置</h2><p>更改会自动保存在本机</p></div>
+      <div class="settings-save-state" aria-live="polite">{saving ? '保存中…' : saved ? '已保存' : ''}</div>
       <button class="ghost icon-only" aria-label="关闭设置" use:tooltip={'关闭设置'} on:click={onClose}><X /></button>
     </header>
 
-    <div class="settings-body">
-      <label class="setting-row">
-        <span class="setting-icon"><Keyboard /></span>
-        <span class="setting-copy"><strong>全局快捷键</strong><small>随时直接唤起便签编辑页，不打开首页</small></span>
-        <button
-          class="hotkey-capture"
-          class:capturing
-          on:click={() => (capturing = true)}
-        >{capturing ? '请按组合键…' : draft.hotkey}</button>
-      </label>
+    <div class:narrow class="settings-layout">
+      {#if !narrow || active === null}
+      <nav class:category-home={narrow} class="settings-nav" aria-label="设置分类">
+        {#each sections as section}
+          <button class:active={active === section.id} on:click={() => (active = section.id)}><span><strong>{section.label}</strong><small>{section.hint}</small></span><ChevronRight /></button>
+        {/each}
+      </nav>
+      {/if}
 
-      <label class="setting-row">
-        <span class="setting-icon"><MousePointerClick /></span>
-        <span class="setting-copy"><strong>快捷键动作</strong><small>选择恢复上次便签，或者直接新建便签</small></span>
-        <select bind:value={draft.hotkeyAction}>
-          <option value="last-note">上次便签</option>
-          <option value="new-note">新建便签</option>
-        </select>
-      </label>
+      {#if !narrow || active !== null}
+      <div class="settings-content">
+        {#if narrow}<button class="settings-back" on:click={() => (active = null)}><ArrowLeft />所有设置</button>{/if}
+        {#if active === 'general'}
+          <div class="settings-section-heading"><h3>常规</h3><p>控制轻笺的基础外观和启动方式。</p></div>
+          <label class="setting-item"><span><strong>主题</strong><small>默认白色是主要设计基底</small></span><select bind:value={draft.themeId} on:change={() => void commit()}><option value="default-light">默认白色</option><option value="system">跟随系统</option><option value="dark">深色</option></select></label>
+          <label class="setting-item"><span><strong>开机自动启动</strong><small>静默驻留托盘，不主动弹出工作台</small></span><input class="switch" type="checkbox" bind:checked={draft.startOnBoot} on:change={() => void commit()} /></label>
+          <label class="setting-item"><span><strong>恢复桌面便签</strong><small>开机后恢复上次可见便签</small></span><input class="switch" type="checkbox" bind:checked={draft.restoreNoteWindowsOnBoot} on:change={() => void commit()} /></label>
+        {:else if active === 'note'}
+          <div class="settings-section-heading"><h3>便签外观</h3><p>这些值只作为新便签的默认样式。</p></div>
+          <label class="setting-item"><span><strong>默认置顶</strong><small>新便签保持在其他窗口上方</small></span><input class="switch" type="checkbox" bind:checked={draft.defaultNoteAlwaysOnTop} on:change={() => void commit()} /></label>
+          <div class="setting-item setting-item-stack"><span><strong>默认可见度</strong><small>分别控制纸张和正文文字</small></span><div class="settings-range"><label>背景 <input type="range" min="0" max="100" step="5" bind:value={draft.defaultNoteBackgroundOpacity} on:change={() => void commit()} /><b>{draft.defaultNoteBackgroundOpacity}%</b></label><label>文字 <input type="range" min="20" max="100" step="5" bind:value={draft.defaultNoteTextOpacity} on:change={() => void commit()} /><b>{draft.defaultNoteTextOpacity}%</b></label></div></div>
+          <div class="setting-item"><span><strong>默认文字</strong><small>字体和字号</small></span><div class="default-type-controls"><select bind:value={draft.defaultFontFamily} on:change={() => void commit()}><option value="Microsoft YaHei UI">微软雅黑</option><option value="DengXian">等线</option><option value="SimSun">宋体</option><option value="SimHei">黑体</option><option value="KaiTi">楷体</option><option value="Segoe UI Variable">Segoe UI</option></select><input type="number" min="9" max="72" bind:value={draft.defaultFontSize} on:change={() => void commit()} aria-label="默认字号" /></div></div>
+          <label class="setting-item"><span><strong>正文行距</strong><small>所有便签统一使用</small></span><select bind:value={draft.defaultLineHeight} on:change={() => void commit()}><option value={1.4}>紧凑</option><option value={1.55}>舒适</option><option value={1.7}>宽松</option></select></label>
+          <label class="setting-item"><span><strong>胶囊内容</strong><small>选择摘要信息密度</small></span><select bind:value={draft.capsuleDisplay} on:change={() => void commit()}><option value="comfortable">标题 + 两行正文</option><option value="compact">单行摘要</option></select></label>
+        {:else if active === 'shortcut'}
+          <div class="settings-section-heading"><h3>快捷键</h3><p>快捷键失败不会影响轻笺正常启动。</p></div>
+          <div class="setting-item"><span><strong>全局快捷键</strong><small>随时打开上次便签或新建便签</small></span><button class:capturing class="hotkey-capture" on:click={() => (capturing = true)}>{capturing ? '请按组合键…' : draft.hotkey}</button></div>
+          <label class="setting-item"><span><strong>快捷键动作</strong><small>决定按下快捷键后的行为</small></span><select bind:value={draft.hotkeyAction} on:change={() => void commit()}><option value="last-note">打开上次便签</option><option value="new-note">新建便签</option></select></label>
+          <div class="shortcut-reference"><strong>救援快捷键</strong><p><kbd>Ctrl+Alt+H</kbd> 显示或隐藏桌面便签</p><p><kbd>Ctrl+Alt+L</kbd> 解锁鼠标穿透便签</p><p><kbd>Ctrl+Alt+O</kbd> 恢复便签可见度</p></div>
+        {:else if active === 'data'}
+          <div class="settings-section-heading"><h3>数据与备份</h3><p>便签正文、设置和图片均保存在本机。</p></div>
+          <div class="setting-item"><span><strong>完整备份</strong><small>导出全部便签、标签、设置和图片</small></span><button class="secondary" on:click={onBackup}>导出备份</button></div>
+          <div class="setting-item"><span><strong>恢复数据</strong><small>默认合并导入，不覆盖已有便签</small></span><button class="secondary" on:click={onRestore}>选择备份</button></div>
+          <div class="local-data-note"><strong>本地优先</strong><p>日常编辑、搜索、保存、导出和恢复都不需要网络。</p></div>
+        {:else if active === 'about'}
+          <div class="settings-section-heading"><h3>关于与更新</h3><p>当前版本 {appVersion}</p></div>
+          <label class="setting-item"><span><strong>自动检查更新</strong><small>仅此功能会访问网络；失败不影响本地使用</small></span><input class="switch" type="checkbox" bind:checked={draft.checkUpdatesOnStartup} on:change={() => void commit()} /></label>
+          <div class="setting-item"><span><strong>软件更新</strong><small>手动检查 GitHub 正式版本</small></span><button class="secondary" disabled={checkingUpdate} on:click={onCheckUpdate}>{checkingUpdate ? '检查中…' : '检查更新'}</button></div>
+        {:else}
+          <div class="settings-section-heading"><h3>高级</h3><p>窗口停靠和可见性相关设置。</p></div>
+          <label class="setting-item"><span><strong>贴边自动收起</strong><small>关闭后仍可贴边，但不会缩成边缘标记</small></span><input class="switch" type="checkbox" bind:checked={draft.autoHideAtScreenEdge} on:change={() => void commit()} /></label>
+          <div class="advanced-note"><strong>鼠标穿透</strong><p>锁定属于单张便签操作。锁定后使用 Ctrl+Alt+L 解锁。</p></div>
+        {/if}
 
-      <label class="setting-row">
-        <span class="setting-icon"><SunMoon /></span>
-        <span class="setting-copy"><strong>外观</strong><small>暖白主题会随系统切换深色模式</small></span>
-        <select bind:value={draft.theme}>
-          <option value="system">跟随系统</option>
-          <option value="light">浅色</option>
-          <option value="dark">深色</option>
-        </select>
-      </label>
-
-      <label class="setting-row">
-        <span class="setting-icon"><Pin /></span>
-        <span class="setting-copy"><strong>新便签默认置顶</strong><small>只影响之后新建的桌面便签，工作台不会置顶</small></span>
-        <input class="switch" type="checkbox" bind:checked={draft.defaultNoteAlwaysOnTop} />
-      </label>
-
-      <label class="setting-row">
-        <span class="setting-icon"><SunMoon /></span>
-        <span class="setting-copy"><strong>新便签默认背景</strong><small>只淡化便签纸张，不影响文字与按钮</small></span>
-        <input type="range" min="0" max="100" step="5" bind:value={draft.defaultNoteBackgroundOpacity} />
-        <b>{draft.defaultNoteBackgroundOpacity}%</b>
-      </label>
-
-      <label class="setting-row">
-        <span class="setting-icon"><Type /></span>
-        <span class="setting-copy"><strong>新便签默认文字</strong><small>正文透明度范围 20%–100%，图片与控件保持清晰</small></span>
-        <input type="range" min="20" max="100" step="5" bind:value={draft.defaultNoteTextOpacity} />
-        <b>{draft.defaultNoteTextOpacity}%</b>
-      </label>
-
-      <div class="setting-row">
-        <span class="setting-icon"><Keyboard /></span>
-        <span class="setting-copy"><strong>解锁快捷键</strong><small>锁定后完全鼠标穿透；按 Ctrl+Alt+L 或使用托盘菜单恢复</small></span>
-        <kbd>Ctrl+Alt+L</kbd>
+        {#if error}<p class="settings-error" role="alert">{error}</p>{/if}
       </div>
-
-      <div class="setting-row">
-        <span class="setting-icon"><SunMoon /></span>
-        <span class="setting-copy"><strong>可见度救援</strong><small>按 Ctrl+Alt+O 或使用托盘，将所有便签恢复为背景 85%、文字 100%</small></span>
-        <kbd>Ctrl+Alt+O</kbd>
-      </div>
-
-      <div class="setting-row">
-        <span class="setting-icon"><Type /></span>
-        <span class="setting-copy"><strong>默认文字</strong><small>新输入文字使用的字体与字号</small></span>
-        <div class="default-type-controls">
-          <select bind:value={draft.defaultFontFamily} aria-label="默认字体">
-            <option value="Microsoft YaHei UI">微软雅黑</option>
-            <option value="DengXian">等线</option>
-            <option value="SimSun">宋体</option>
-            <option value="SimHei">黑体</option>
-            <option value="KaiTi">楷体</option>
-            <option value="Segoe UI Variable">Segoe UI</option>
-          </select>
-          <input type="number" min="9" max="72" bind:value={draft.defaultFontSize} aria-label="默认字号" />
-        </div>
-      </div>
-
-      <label class="setting-row">
-        <span class="setting-icon"><Rocket /></span>
-        <span class="setting-copy"><strong>开机自动启动</strong><small>静默驻留托盘，不主动弹出窗口</small></span>
-        <input class="switch" type="checkbox" bind:checked={draft.startOnBoot} />
-      </label>
-
-      <label class="setting-row">
-        <span class="setting-icon"><Pin /></span>
-        <span class="setting-copy"><strong>开机恢复桌面便签</strong><small>恢复上次可见便签，但不弹出工作台</small></span>
-        <input class="switch" type="checkbox" bind:checked={draft.restoreNoteWindowsOnBoot} />
-      </label>
-
-      <label class="setting-row">
-        <span class="setting-icon"><RefreshCw /></span>
-        <span class="setting-copy"><strong>自动检查更新</strong><small>启动后检查 GitHub 正式版，有新版本时弹窗提醒</small></span>
-        <input class="switch" type="checkbox" bind:checked={draft.checkUpdatesOnStartup} />
-      </label>
-
-      <div class="setting-row">
-        <span class="setting-icon"><Download /></span>
-        <span class="setting-copy"><strong>软件更新</strong><small>当前版本 {appVersion}，可随时手动检查</small></span>
-        <button class="secondary update-check-button" disabled={checkingUpdate} on:click={onCheckUpdate}>
-          {checkingUpdate ? '检查中…' : '检查更新'}
-        </button>
-      </div>
-
-      <div class="setting-row">
-        <span class="setting-icon"><Download /></span>
-        <span class="setting-copy"><strong>完整备份</strong><small>保存全部便签、标签、设置和图片</small></span>
-        <button class="secondary" on:click={onBackup}>导出备份</button>
-      </div>
-
-      <div class="setting-row">
-        <span class="setting-icon"><Upload /></span>
-        <span class="setting-copy"><strong>恢复数据</strong><small>默认合并导入，不覆盖现有便签</small></span>
-        <button class="secondary" on:click={onRestore}>选择备份</button>
-      </div>
+      {/if}
     </div>
-
-    {#if error}<p class="settings-error">{error}</p>{/if}
-
-    <footer>
-      <span>数据仅保存在这台电脑上</span>
-      <div>
-        <button class="secondary" on:click={onClose}>取消</button>
-        <button class="primary" disabled={saving} on:click={save}>{saving ? '保存中…' : '保存设置'}</button>
-      </div>
-    </footer>
   </div>
 </div>

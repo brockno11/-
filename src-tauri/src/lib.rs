@@ -13,16 +13,47 @@ use tauri::{
     Emitter, Manager,
 };
 
+fn request_quit(app: &tauri::AppHandle) {
+    let _ = app.emit("qingjian://quit-requested", ());
+    let fallback = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        fallback.exit(0);
+    });
+}
+
 fn request_show(app: &tauri::AppHandle) {
     windows::show_hub(app);
     let _ = app.emit("qingjian://show-requested", ());
 }
 
+#[cfg(target_os = "windows")]
+fn watch_instance_signal(app: &tauri::AppHandle, raw_signal: isize) {
+    if raw_signal == 0 { return }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        use ::windows::Win32::{
+            Foundation::{HANDLE, WAIT_OBJECT_0},
+            System::Threading::{WaitForSingleObject, INFINITE},
+        };
+        let signal = HANDLE(raw_signal as *mut core::ffi::c_void);
+        loop {
+            if unsafe { WaitForSingleObject(signal, INFINITE) } != WAIT_OBJECT_0 { break }
+            let scheduler = app.clone();
+            let to_show = app.clone();
+            // Queueing may report a transient event-loop error while the window
+            // is being recreated. Keep the signal watcher alive so later
+            // desktop/tray launches can always recover the workbench.
+            let _ = scheduler.run_on_main_thread(move || request_show(&to_show));
+        }
+    });
+}
+
 fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "显示轻笺工作台", true, None::<&str>)?;
     let new_note = MenuItem::with_id(app, "new", "新建便签", true, Some("Ctrl+N"))?;
-    let show_notes = MenuItem::with_id(app, "show_notes", "显示全部便签", true, None::<&str>)?;
-    let hide_notes = MenuItem::with_id(app, "hide_notes", "隐藏全部便签", true, None::<&str>)?;
+    let show_notes = MenuItem::with_id(app, "show_notes", "显示全部便签  Ctrl+Alt+H", true, None::<&str>)?;
+    let hide_notes = MenuItem::with_id(app, "hide_notes", "隐藏全部便签  Ctrl+Alt+H", true, None::<&str>)?;
     let unlock_notes = MenuItem::with_id(app, "unlock_notes", "解锁全部便签  Ctrl+Alt+L", true, None::<&str>)?;
     let restore_visibility = MenuItem::with_id(app, "restore_visibility", "恢复便签可见度  Ctrl+Alt+O", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置与开机自启", true, None::<&str>)?;
@@ -53,7 +84,7 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 windows::show_hub(app);
                 let _ = app.emit("qingjian://check-update", ());
             }
-            "quit" => { let _ = app.emit("qingjian://quit-requested", ()); }
+            "quit" => request_quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -69,25 +100,38 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run(instance_signal: Option<isize>) {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| request_show(app)))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_window_state::Builder::default()
+            .with_state_flags(
+                tauri_plugin_window_state::StateFlags::POSITION
+                    | tauri_plugin_window_state::StateFlags::SIZE,
+            )
             .with_filter(|label| label == windows::HUB_LABEL)
             .build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
-        .setup(|app| {
+        .on_window_event(|window, event| {
+            if window.label() == windows::HUB_LABEL {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .setup(move |app| {
             let data_dir = app.path().app_local_data_dir()?;
             let state = AppState::initialize(data_dir.clone())?;
             app.manage(state);
             build_tray(app)?;
+            #[cfg(target_os = "windows")]
+            if let Some(signal) = instance_signal { watch_instance_signal(app.handle(), signal); }
             if let Some(window) = app.get_webview_window(windows::HUB_LABEL) {
                 windows::install_window_appearance(&window);
                 windows::position_hub_on_first_launch(&window, &data_dir);
@@ -95,6 +139,8 @@ pub fn run() {
             let on_boot = std::env::args().any(|argument| argument == "--hidden");
             if on_boot {
                 if let Some(window) = app.get_webview_window(windows::HUB_LABEL) { let _ = window.hide(); }
+            } else {
+                windows::show_hub(app.handle());
             }
             windows::restore_visible_note_windows(app.handle(), on_boot);
             Ok(())
@@ -106,6 +152,7 @@ pub fn run() {
             commands::save_note,
             commands::delete_note,
             commands::restore_note,
+            commands::batch_note_action,
             commands::permanently_delete_note,
             commands::empty_trash,
             commands::set_note_archived,
@@ -145,6 +192,7 @@ pub fn run() {
             windows::expand_docked_note_window,
             windows::unlock_all_note_windows,
             windows::restore_all_note_visibility,
+            windows::toggle_all_note_windows,
         ])
         .run(tauri::generate_context!())
         .expect("轻笺启动失败");

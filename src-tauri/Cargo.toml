@@ -1,6 +1,6 @@
 [package]
 name = "qingjian"
-version = "0.6.0"
+version = "0.7.0"
 description = "轻量、纯本地的 Windows 富文本便签"
 authors = ["QingJian"]
 edition = "2021"
@@ -27,7 +27,6 @@ tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-process = "2"
-tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
 tempfile = "3"
@@ -39,6 +38,8 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
 zip = "0.6.6"

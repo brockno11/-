@@ -1,9 +1,11 @@
-export type Theme = 'system' | 'light' | 'dark'
+import type { ThemeId } from './theme'
+export type { ThemeId } from './theme'
 export type SaveState = 'saved' | 'saving' | 'dirty' | 'error'
 export type WindowLayout = 'integrated' | 'separate'
 export type HotkeyWindowScope = 'editor' | 'both'
 export type HotkeyAction = 'last-note' | 'new-note'
 export type NoteWindowMode = 'capsule' | 'card' | 'editor'
+export type CapsuleDisplay = 'compact' | 'comfortable'
 export type DockEdge = 'left' | 'right' | 'top' | 'bottom' | null
 export type OpacityLayer = 'background' | 'text'
 
@@ -75,9 +77,12 @@ export interface Note extends NoteSummary {
 export interface AppSettings {
   hotkey: string
   startOnBoot: boolean
-  theme: Theme
+  themeId: ThemeId
   defaultFontFamily: string
   defaultFontSize: number
+  defaultLineHeight: number
+  capsuleDisplay: CapsuleDisplay
+  autoHideAtScreenEdge: boolean
   sidebarCollapsed: boolean
   defaultNoteAlwaysOnTop: boolean
   defaultNoteBackgroundOpacity: number
@@ -113,12 +118,22 @@ export function normalizeHotkeyAction(value: unknown): HotkeyAction {
   return value === 'new-note' ? 'new-note' : 'last-note'
 }
 
+export const RESERVED_GLOBAL_HOTKEYS = ['Ctrl+Alt+H', 'Ctrl+Alt+L', 'Ctrl+Alt+O'] as const
+
+export function isReservedGlobalHotkey(value: string): boolean {
+  const normalized = value.replace(/\s+/g, '').toLowerCase()
+  return RESERVED_GLOBAL_HOTKEYS.some((hotkey) => hotkey.toLowerCase() === normalized)
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
   hotkey: 'Ctrl+Alt+N',
   startOnBoot: false,
-  theme: 'system',
+  themeId: 'default-light',
   defaultFontFamily: 'Microsoft YaHei UI',
   defaultFontSize: 16,
+  defaultLineHeight: 1.55,
+  capsuleDisplay: 'comfortable',
+  autoHideAtScreenEdge: true,
   sidebarCollapsed: false,
   defaultNoteAlwaysOnTop: false,
   defaultNoteBackgroundOpacity: 100,

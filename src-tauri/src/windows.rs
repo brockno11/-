@@ -23,7 +23,7 @@ const WEBVIEW_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreen
 
 fn mode_spec(mode: &str) -> Result<(f64, f64, f64, f64, Option<(f64, f64)>), AppError> {
     match mode {
-        "capsule" => Ok((320.0, 64.0, 240.0, 52.0, Some((520.0, 88.0)))),
+        "capsule" => Ok((336.0, 76.0, 260.0, 72.0, Some((560.0, 104.0)))),
         "card" => Ok((360.0, 280.0, 280.0, 160.0, None)),
         "editor" => Ok((844.0, 644.0, 584.0, 444.0, None)),
         _ => Err(AppError::Invalid("便签窗口形态无效".into())),
@@ -112,9 +112,27 @@ pub fn position_hub_on_first_launch(hub: &WebviewWindow, data_dir: &std::path::P
 fn show_window(window: &WebviewWindow, focus: bool) -> Result<(), AppError> {
     window.show().map_err(|error| AppError::Other(error.to_string()))?;
     window.unminimize().map_err(|error| AppError::Other(error.to_string()))?;
+    restore_native_window(window, focus);
     if focus { window.set_focus().map_err(|error| AppError::Other(error.to_string()))?; }
     Ok(())
 }
+
+#[cfg(target_os = "windows")]
+fn restore_native_window(window: &WebviewWindow, focus: bool) {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE},
+    };
+    let Ok(raw_hwnd) = window.hwnd() else { return };
+    let hwnd = HWND(raw_hwnd.0);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        if focus { let _ = SetForegroundWindow(hwnd); }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_native_window(_window: &WebviewWindow, _focus: bool) {}
 
 fn read_settings(state: &AppState) -> Result<AppSettings, AppError> {
     let db = state.db.lock().map_err(|_| AppError::Other("数据库连接不可用".into()))?;
@@ -313,13 +331,13 @@ fn mark_visible(state: &AppState, note_id: &str, visible: bool) -> Result<(), Ap
 
 #[tauri::command]
 pub async fn show_hub_window(app: AppHandle) -> Result<(), AppError> {
-    let hub = app.get_webview_window(HUB_LABEL).ok_or_else(|| AppError::Other("找不到工作台".into()))?;
+    let hub = ensure_hub_window(&app)?;
     show_window(&hub, true)
 }
 
 #[tauri::command]
 pub async fn toggle_hub_window(app: AppHandle) -> Result<bool, AppError> {
-    let hub = app.get_webview_window(HUB_LABEL).ok_or_else(|| AppError::Other("找不到工作台".into()))?;
+    let hub = ensure_hub_window(&app)?;
     let visible = hub.is_visible().map_err(|error| AppError::Other(error.to_string()))?;
     let focused = hub.is_focused().map_err(|error| AppError::Other(error.to_string()))?;
     if visible && focused { hub.hide().map_err(|error| AppError::Other(error.to_string()))?; return Ok(false); }
@@ -521,6 +539,7 @@ pub fn finalize_note_window_move(app: AppHandle, state: State<'_, AppState>, not
 
 #[tauri::command]
 pub fn collapse_docked_note_window(app: AppHandle, state: State<'_, AppState>, note_id: String) -> Result<(), AppError> {
+    if !read_settings(&state)?.auto_hide_at_screen_edge { return Ok(()); }
     let note_state = read_window_state(&state, &note_id)?.ok_or_else(|| AppError::Invalid("便签窗口状态不存在".into()))?;
     let Some(edge) = note_state.dock_edge.as_deref() else { return Ok(()) };
     if note_state.locked { return Ok(()); }
@@ -576,6 +595,21 @@ pub fn hide_all(app: &AppHandle) {
         }
     }
     let _ = app.emit("qingjian://note-windows-changed", ());
+}
+
+#[tauri::command]
+pub fn toggle_all_note_windows(app: AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let has_visible_notes = list_window_ids(&state, false, false)
+        .map(|ids| !ids.is_empty())
+        .unwrap_or(false);
+    if has_visible_notes {
+        hide_all(&app);
+        false
+    } else {
+        show_all(&app);
+        true
+    }
 }
 
 pub fn unlock_all(app: &AppHandle) {
@@ -645,8 +679,35 @@ pub fn restore_visible_note_windows(app: &AppHandle, on_boot: bool) {
     }
 }
 
+fn ensure_hub_window(app: &AppHandle) -> Result<WebviewWindow, AppError> {
+    if let Some(hub) = app.get_webview_window(HUB_LABEL) {
+        if hub.hwnd().is_ok() { return Ok(hub) }
+        let _ = hub.destroy();
+    }
+    let hub = WebviewWindowBuilder::new(app, HUB_LABEL, WebviewUrl::App("index.html".into()))
+        .title("轻笺工作台")
+        .inner_size(404.0, 704.0)
+        .min_inner_size(344.0, 504.0)
+        .decorations(false)
+        .resizable(true)
+        .transparent(true)
+        .shadow(false)
+        .background_color(Color(0, 0, 0, 0))
+        .visible(false)
+        .additional_browser_args(WEBVIEW_ARGS)
+        .center()
+        .build()
+        .map_err(|error| AppError::Other(format!("重建工作台失败：{error}")))?;
+    install_window_appearance(&hub);
+    Ok(hub)
+}
+
 pub fn show_hub(app: &AppHandle) {
-    if let Some(hub) = app.get_webview_window(HUB_LABEL) { let _ = show_window(&hub, true); }
+    if let Ok(hub) = ensure_hub_window(app) {
+        if show_window(&hub, true).is_ok() { return }
+        let _ = hub.destroy();
+    }
+    if let Ok(rebuilt) = ensure_hub_window(app) { let _ = show_window(&rebuilt, true); }
 }
 
 #[cfg(test)]
@@ -655,7 +716,7 @@ mod tests {
 
     #[test]
     fn window_modes_enforce_the_product_size_contract() {
-        assert_eq!(mode_spec("capsule").unwrap(), (320.0, 64.0, 240.0, 52.0, Some((520.0, 88.0))));
+        assert_eq!(mode_spec("capsule").unwrap(), (336.0, 76.0, 260.0, 72.0, Some((560.0, 104.0))));
         assert_eq!(mode_spec("card").unwrap(), (360.0, 280.0, 280.0, 160.0, None));
         assert_eq!(mode_spec("editor").unwrap(), (844.0, 644.0, 584.0, 444.0, None));
         assert!(mode_spec("invalid").is_err());

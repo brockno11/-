@@ -1,7 +1,7 @@
 {
   "name": "qingjian",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,9 @@
     "version:check": "node scripts/check-version.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "qa:windows": "powershell -ExecutionPolicy Bypass -File scripts/test-windows-lifecycle.ps1",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:standalone": "tauri build --no-bundle",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -45,6 +48,6 @@
     "svelte-check": "^4.1.1",
     "typescript": "~5.7.2",
     "vite": "^6.0.0",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.4"
   }
 }

@@ -196,59 +196,25 @@
       <button class="layout-button wrap-button" class:active={imageLayout === 'wrap-right'} aria-label="图片靠右，文字在左侧环绕" use:tooltip={'图片靠右，文字在左侧环绕'} on:click={() => setImageLayout('wrap-right')}><WrapText />图右文左</button>
     </div>
   {:else}
-    <select
-      class="block-select"
-      aria-label="段落样式，支持 Markdown 快捷输入"
-      title="Markdown：输入 #、>、-、1.、[ ] 或 ``` 后按空格"
-      value={blockStyle}
-      on:mousedown={rememberTextSelection}
-      on:change={(event) => applyBlockStyle(event.currentTarget.value)}
-    >
-      <option value="paragraph">正文</option>
-      <option value="h1">一级标题　#</option>
-      <option value="h2">二级标题　##</option>
-      <option value="h3">三级标题　###</option>
-      <option value="blockquote">引用　&gt;</option>
-      <option value="codeBlock">代码块　```</option>
-    </select>
-
-    <select
-      class="font-select"
-      aria-label="字体"
-      value={currentFont}
-      on:mousedown={rememberTextSelection}
-      on:change={(event) => applyFont(event.currentTarget.value)}
-    >
-      <option value="">默认字体</option>
-      {#each fontChoices as font}
-        <option value={font} style={`font-family:${font}`}>{font}</option>
-      {/each}
-    </select>
-
-    <select
-      class="size-select"
-      aria-label="字号"
-      value={currentSize}
-      on:mousedown={rememberTextSelection}
-      on:change={(event) => applyFontSize(event.currentTarget.value)}
-    >
-      {#each sizes as size}
-        <option value={size}>{size}</option>
-      {/each}
-    </select>
-
-    <span class="toolbar-divider"></span>
     <button class:active={editor?.isActive('bold')} aria-label="粗体 Ctrl+B" use:tooltip={'粗体 · Ctrl+B'} on:click={() => command(() => editor?.chain().focus().toggleBold().run())}><Bold /></button>
+    <button class:active={editor?.isActive('italic')} aria-label="斜体 Ctrl+I" use:tooltip={'斜体 · Ctrl+I'} on:click={() => command(() => editor?.chain().focus().toggleItalic().run())}><Italic /></button>
     <button class:active={editor?.isActive('taskList')} aria-label="圆圈待办" use:tooltip={'圆圈待办 · 点击圆圈即可完成'} on:click={() => command(() => editor?.chain().focus().toggleTaskList().run())}><CircleCheckBig /></button>
-    <button aria-label="插入图片" use:tooltip={'插入图片'} on:click={onPickImage}><ImagePlus /></button>
+    <button class:active={editor?.isActive('bulletList')} aria-label="项目符号" use:tooltip={'项目符号'} on:click={() => command(() => editor?.chain().focus().toggleBulletList().run())}><List /></button>
     <div class="format-more-anchor" data-transient-root>
       <button class:active={menuOpen} aria-label="更多格式" use:tooltip={'更多格式'} on:mousedown|preventDefault={rememberTextSelection} on:click={toggleMore}><MoreHorizontal /></button>
       {#if menuOpen}
         <div class="format-more-menu" role="menu" aria-label="更多格式">
+          <section class="advanced-format-controls">
+            <small>段落与字体</small>
+            <div>
+              <select class="block-select" aria-label="段落样式" value={blockStyle} on:mousedown={rememberTextSelection} on:change={(event) => applyBlockStyle(event.currentTarget.value)}><option value="paragraph">正文</option><option value="h1">一级标题</option><option value="h2">二级标题</option><option value="h3">三级标题</option><option value="blockquote">引用</option><option value="codeBlock">代码块</option></select>
+              <select class="font-select" aria-label="字体" value={currentFont} on:mousedown={rememberTextSelection} on:change={(event) => applyFont(event.currentTarget.value)}><option value="">默认字体</option>{#each fontChoices as font}<option value={font} style={`font-family:${font}`}>{font}</option>{/each}</select>
+              <select class="size-select" aria-label="字号" value={currentSize} on:mousedown={rememberTextSelection} on:change={(event) => applyFontSize(event.currentTarget.value)}>{#each sizes as size}<option value={size}>{size}</option>{/each}</select>
+            </div>
+          </section>
           <section>
             <small>文字</small>
             <div>
-              <button class:active={editor?.isActive('italic')} aria-label="斜体" on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleItalic().run())}><Italic /><span>斜体</span></button>
               <button class:active={editor?.isActive('underline')} aria-label="下划线" on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleUnderline().run())}><Underline /><span>下划线</span></button>
               <button class:active={editor?.isActive('strike')} aria-label="删除线" on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleStrike().run())}><Strikethrough /><span>删除线</span></button>
             </div>
@@ -256,7 +222,6 @@
           <section>
             <small>列表</small>
             <div>
-              <button class:active={editor?.isActive('bulletList')} on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleBulletList().run())}><List /><span>项目符号</span></button>
               <button class:active={editor?.isActive('orderedList')} on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().toggleOrderedList().run())}><ListOrdered /><span>编号列表</span></button>
             </div>
           </section>
@@ -272,6 +237,7 @@
             <small>{inTable ? '表格操作' : '插入'}</small>
             <div class="table-menu-grid">
               {#if !inTable}
+                <button on:mousedown|preventDefault on:click={() => { onPickImage(); onMenuOpenChange(false) }}><ImagePlus /><span>图片</span></button>
                 <button on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run())}><Table2 /><span>3×3 表格</span></button>
               {:else}
                 <button on:mousedown|preventDefault on:click={() => moreCommand(() => editor?.chain().focus().addRowAfter().run())}><Rows3 /><span>增行</span><Plus class="corner-icon" /></button>

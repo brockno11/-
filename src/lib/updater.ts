@@ -3,7 +3,7 @@ import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
 
 const isDesktop = '__TAURI_INTERNALS__' in window
-const FALLBACK_VERSION = '0.6.0'
+const FALLBACK_VERSION = '0.7.0'
 
 let pendingUpdate: Update | null = null
 

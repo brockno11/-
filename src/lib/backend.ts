@@ -11,8 +11,12 @@ import type {
   WorkspaceState,
 } from './types'
 import { DEFAULT_SETTINGS, EMPTY_DOCUMENT, normalizeHotkeyAction } from './types'
+import { normalizeThemeId } from './theme'
 
 const inTauri = '__TAURI_INTERNALS__' in window
+if (!inTauri && !import.meta.env.DEV) {
+  throw new Error('轻笺生产界面必须由本地桌面运行时启动，已拒绝浏览器存储回退')
+}
 const MOCK_NOTES_KEY = 'qingjian.mock.notes'
 const MOCK_SETTINGS_KEY = 'qingjian.mock.settings'
 
@@ -145,6 +149,17 @@ export const backend = {
     ))
   },
 
+  async batchNoteAction(ids: string[], action: 'trash' | 'restore' | 'archive' | 'unarchive' | 'permanent-delete'): Promise<void> {
+    if (inTauri) return invoke('batch_note_action', { ids, action })
+    for (const id of ids) {
+      if (action === 'trash') await this.deleteNote(id)
+      else if (action === 'restore') await this.restoreNote(id)
+      else if (action === 'archive') await this.setNoteArchived(id, true)
+      else if (action === 'unarchive') await this.setNoteArchived(id, false)
+      else await this.permanentlyDeleteNote(id)
+    }
+  },
+
   async permanentlyDeleteNote(id: string): Promise<void> {
     if (inTauri) return invoke('permanently_delete_note', { id })
     writeMockNotes(readMockNotes().filter((note) => note.id !== id))
@@ -221,12 +236,28 @@ export const backend = {
     if (inTauri) return invoke('move_note', { noteId, folderId, beforeNoteId })
     const notes = readMockNotes()
     const note = notes.find((item) => item.id === noteId)
-    if (note) note.folderId = folderId
+    if (!note) return
+    const sourceFolderId = note.folderId
+    note.folderId = folderId
+    const target = notes
+      .filter((item) => item.id !== noteId && item.folderId === folderId)
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+    const beforeIndex = beforeNoteId ? target.findIndex((item) => item.id === beforeNoteId) : -1
+    const targetIndex = beforeIndex >= 0 ? beforeIndex : target.length
+    target.splice(targetIndex, 0, note)
+    target.forEach((item, index) => (item.sortOrder = index + 1))
+    if (sourceFolderId !== folderId) {
+      notes.filter((item) => item.folderId === sourceFolderId)
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .forEach((item, index) => (item.sortOrder = index + 1))
+    }
     writeMockNotes(notes)
   },
 
   async reorderNote(noteId: string, beforeNoteId: string | null): Promise<void> {
     if (inTauri) return invoke('reorder_note', { noteId, beforeNoteId })
+    const note = readMockNotes().find((item) => item.id === noteId)
+    if (note) await this.moveNote(noteId, note.folderId, beforeNoteId)
   },
 
   async getWorkspaceState(): Promise<WorkspaceState> {
@@ -248,6 +279,7 @@ export const backend = {
     return {
       ...DEFAULT_SETTINGS,
       ...stored,
+      themeId: normalizeThemeId(stored.themeId ?? stored.theme),
       defaultNoteAlwaysOnTop: stored.defaultNoteAlwaysOnTop ?? stored.alwaysOnTop ?? false,
       defaultNoteBackgroundOpacity: Math.max(0, Math.min(100,
         stored.defaultNoteBackgroundOpacity ?? stored.defaultNoteOpacity ?? 100)),
@@ -354,6 +386,18 @@ export const backend = {
       state.textOpacity = 100
       localStorage.setItem(key, JSON.stringify(state))
     }
+  },
+
+  async toggleAllNoteWindows(): Promise<boolean> {
+    if (inTauri) return invoke('toggle_all_note_windows')
+    const keys = Object.keys(localStorage).filter((item) => item.startsWith('qingjian.mock.window.'))
+    const states = keys.map((key) => JSON.parse(localStorage.getItem(key)!) as NoteWindowState)
+    const nextVisible = !states.some((state) => state.visible)
+    states.forEach((state, index) => {
+      state.visible = nextVisible
+      localStorage.setItem(keys[index], JSON.stringify(state))
+    })
+    return nextVisible
   },
 
   async showHubWindow(): Promise<void> {

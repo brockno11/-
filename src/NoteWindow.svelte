@@ -5,12 +5,17 @@
   import { emit, listen } from '@tauri-apps/api/event'
   import { confirm, save } from '@tauri-apps/plugin-dialog'
   import {
-    Archive, Code2, Copy, Download, EyeOff, FileDown, ImagePlus, LockKeyhole,
-    Blend, MoreHorizontal, Pin, PinOff, Settings, Tags, Text, Trash2, Unlock, X,
+    Archive, Code2, Copy, Download, FileDown, ImagePlus, LockKeyhole,
+    Blend, Bold, CircleCheckBig, Italic, List, ListOrdered, MoreHorizontal,
+    Pilcrow, Pin, PinOff, Settings, Strikethrough, Tags, Text, Trash2, Underline,
+    Unlock, X,
   } from 'lucide-svelte'
   import { backend } from './lib/backend'
   import { documentTitle } from './lib/note'
+  import { SaveCoordinator } from './lib/save-coordinator'
   import { serializeMarkdown } from './lib/markdown'
+  import { tooltip } from './lib/tooltip'
+  import { themeClass as resolveThemeClass } from './lib/theme'
   import { DEFAULT_SETTINGS } from './lib/types'
   import type {
     AppSettings, Note, NoteWindowMode, NoteWindowState, SaveNoteInput, SaveState,
@@ -32,7 +37,7 @@
   let editor: TiptapEditor | undefined
   let fileInput: HTMLInputElement
   let saveState: SaveState = 'saved'
-  let saveTimer: ReturnType<typeof setTimeout> | undefined
+  let saveCoordinator: SaveCoordinator<SaveNoteInput, Note> | undefined
   let geometryTimer: ReturnType<typeof setTimeout> | undefined
   let moveTimer: ReturnType<typeof setTimeout> | undefined
   let dockTimer: ReturnType<typeof setTimeout> | undefined
@@ -40,24 +45,51 @@
   let pendingPlainText = ''
   let toolbarVersion = 0
   let tagDraft = ''
-  let activePopover: 'opacity' | 'tags' | 'more' | 'format' | null = null
+  let activePopover: 'opacity' | 'tags' | 'more' | 'format' | 'text' | null = null
+  let textMenu = { x: 0, y: 0 }
   let loading = true
   let toast = ''
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let collapsed = false
   let locking = false
+  let pendingActions = new Set<string>()
   let cleanups: Array<() => void> = []
 
   $: mode = windowState?.mode ?? 'card'
-  $: themeClass = settings.theme === 'system' ? '' : `theme-${settings.theme}`
+  $: themeClass = resolveThemeClass(settings.themeId)
   $: backgroundPercent = `${windowState?.backgroundOpacity ?? 100}%`
   $: textPercent = `${windowState?.textOpacity ?? 100}%`
   $: capsulePreview = note ? note.preview.split(/\r?\n/)
     .map((line) => line.trim()).filter(Boolean).filter((line, index) => index > 0 || line !== note?.title)
-    .join(' · ') : ''
+    .join('\n') : ''
+  $: capsuleCompact = [note?.title || '新便签', capsulePreview.split('\n')[0]].filter(Boolean).join(' · ')
 
   function closeTransient() {
     activePopover = null
+  }
+
+  function showTextContextMenu(event: MouseEvent) {
+    if (mode !== 'card' || !editor || editor.state.selection.empty) return
+    textMenu = {
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 188)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 222)),
+    }
+    activePopover = 'text'
+  }
+
+  function formatSelectedText(action: 'bold' | 'italic' | 'underline' | 'strike' | 'paragraph' | 'task' | 'bullet' | 'ordered') {
+    if (!editor) return
+    const chain = editor.chain().focus()
+    if (action === 'bold') chain.toggleBold()
+    else if (action === 'italic') chain.toggleItalic()
+    else if (action === 'underline') chain.toggleUnderline()
+    else if (action === 'strike') chain.toggleStrike()
+    else if (action === 'paragraph') chain.setParagraph()
+    else if (action === 'task') chain.toggleTaskList()
+    else if (action === 'bullet') chain.toggleBulletList()
+    else chain.toggleOrderedList()
+    chain.run()
+    closeTransient()
   }
 
   function togglePopover(name: Exclude<typeof activePopover, null>) {
@@ -68,6 +100,21 @@
     toast = message
     clearTimeout(toastTimer)
     toastTimer = setTimeout(() => (toast = ''), duration)
+  }
+
+  async function runNoteAction<T>(key: string, action: () => Promise<T>): Promise<T | undefined> {
+    if (pendingActions.has(key)) return
+    pendingActions = new Set(pendingActions).add(key)
+    try {
+      return await action()
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '操作失败，请重试', 5000)
+      return undefined
+    } finally {
+      const next = new Set(pendingActions)
+      next.delete(key)
+      pendingActions = next
+    }
   }
 
   async function emitDesktop(event: string, payload?: unknown) {
@@ -98,38 +145,26 @@
   }
 
   async function flushSave() {
-    clearTimeout(saveTimer)
     const input = noteInput()
-    if (!input) return
-    saveState = 'saving'
-    try {
-      note = await backend.saveNote(input)
-      pendingContent = undefined
-      saveState = 'saved'
-      await emitDesktop('qingjian://notes-changed')
-    } catch (error) {
-      saveState = 'error'
-      showToast(error instanceof Error ? error.message : '保存失败')
-      throw error
-    }
+    if (!input || !saveCoordinator) return
+    if (!saveCoordinator.hasPendingChanges) saveCoordinator.queue(input)
+    await saveCoordinator.flush()
   }
 
   function scheduleSave(content: Record<string, unknown>, plainText: string) {
     pendingContent = content
     pendingPlainText = plainText
     if (note) note = { ...note, title: documentTitle(plainText), preview: plainText }
-    saveState = 'dirty'
-    clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => void flushSave(), 500)
+    const input = noteInput()
+    if (input) saveCoordinator?.queue(input)
   }
 
   function updateMeta() {
     if (!note || !editor) return
     pendingContent = editor.getJSON() as Record<string, unknown>
     pendingPlainText = editor.getText()
-    saveState = 'dirty'
-    clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => void flushSave(), 500)
+    const input = noteInput()
+    if (input) saveCoordinator?.queue(input)
   }
 
   async function saveTags() {
@@ -147,26 +182,40 @@
 
   async function switchMode(next: NoteWindowMode) {
     if (!windowState || next === mode) return
-    await flushSave()
-    if (next === 'capsule') editor = undefined
-    await ensureEditorResources(next)
-    windowState = await backend.setNoteWindowMode(noteId, next)
-    closeTransient()
-    await tick()
-    if (next !== 'capsule') {
-      if (next === 'card' && editor) {
-        editor.chain().setTextSelection(1).focus().run()
-        if (editorScroll) editorScroll.scrollTop = 0
-      } else {
-        editorView?.focus()
+    await runNoteAction('switch-mode', async () => {
+      await flushSave()
+      if (next === 'capsule') editor = undefined
+      await ensureEditorResources(next)
+      windowState = await backend.setNoteWindowMode(noteId, next)
+      closeTransient()
+      await tick()
+      if (next !== 'capsule') {
+        if (next === 'card' && editor) {
+          editor.chain().setTextSelection(1).focus().run()
+          if (editorScroll) editorScroll.scrollTop = 0
+        } else {
+          editorView?.focus()
+        }
       }
-    }
+    })
   }
 
   async function hideWindow() {
-    await flushSave()
-    await backend.saveNoteWindowGeometry(noteId)
-    await backend.hideNoteWindow(noteId)
+    await runNoteAction('hide-window', async () => {
+      await flushSave()
+      await backend.saveNoteWindowGeometry(noteId)
+      await backend.hideNoteWindow(noteId)
+    })
+  }
+
+  async function openAppSettings() {
+    closeTransient()
+    try {
+      await backend.showHubWindow()
+      await emitDesktop('qingjian://settings')
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '设置打开失败')
+    }
   }
 
   async function toggleAlwaysOnTop() {
@@ -205,10 +254,12 @@
   async function archiveCurrent() {
     closeTransient()
     if (!note) return
-    await flushSave()
-    await backend.setNoteArchived(note.id, true)
-    await emitDesktop('qingjian://notes-changed')
-    await backend.hideNoteWindow(note.id)
+    await runNoteAction('destructive-action', async () => {
+      await flushSave()
+      await backend.setNoteArchived(note!.id, true)
+      await emitDesktop('qingjian://notes-changed')
+      await backend.hideNoteWindow(note!.id)
+    })
   }
 
   async function deleteCurrent() {
@@ -220,10 +271,12 @@
         })
       : window.confirm(`将“${note.title}”移到回收站？`)
     if (!approved) return
-    await flushSave()
-    await backend.deleteNote(note.id)
-    await emitDesktop('qingjian://notes-changed')
-    await backend.hideNoteWindow(note.id)
+    await runNoteAction('destructive-action', async () => {
+      await flushSave()
+      await backend.deleteNote(note!.id)
+      await emitDesktop('qingjian://notes-changed')
+      await backend.hideNoteWindow(note!.id)
+    })
   }
 
   async function clipboardContent() {
@@ -268,14 +321,16 @@
       filters: [{ name: `${extension.toUpperCase()} 文档`, extensions: [extension] }],
     }) : null
     if (!destination) return
-    if (kind === 'markdown') await backend.exportMarkdown(destination, serializeMarkdown(editor.getJSON()))
-    else if (kind === 'html') await backend.exportHtml(note.id, destination, editor.getHTML())
-    else await backend.exportPdf(note.id, destination)
-    showToast('导出完成')
+    await runNoteAction('export', async () => {
+      if (kind === 'markdown') await backend.exportMarkdown(destination, serializeMarkdown(editor!.getJSON()))
+      else if (kind === 'html') await backend.exportHtml(note!.id, destination, editor!.getHTML())
+      else await backend.exportPdf(note!.id, destination)
+      showToast('导出完成')
+    })
   }
 
   async function collapseDocked() {
-    if (!windowState?.dockEdge || windowState.locked || collapsed) return
+    if (!settings.autoHideAtScreenEdge || !windowState?.dockEdge || windowState.locked || collapsed) return
     await backend.collapseDockedNoteWindow(noteId)
     collapsed = true
   }
@@ -289,6 +344,7 @@
 
   function scheduleDockCollapse() {
     clearTimeout(dockTimer)
+    if (!settings.autoHideAtScreenEdge) return
     dockTimer = setTimeout(() => void collapseDocked(), 350)
   }
 
@@ -322,6 +378,21 @@
         ])
         pendingPlainText = note.preview
         tagDraft = note.tags.map((tag) => tag.name).join('、')
+        saveCoordinator = new SaveCoordinator<SaveNoteInput, Note>({
+          delay: 500,
+          save: (input) => backend.saveNote(input),
+          onStateChange: (state, error) => {
+            saveState = state
+            if (state === 'error') showToast(error instanceof Error ? error.message : '保存失败', 5000)
+          },
+          onSaved: (saved, _revision, isLatest) => {
+            if (isLatest) {
+              note = saved
+              pendingContent = undefined
+              void emitDesktop('qingjian://notes-changed')
+            }
+          },
+        })
         await ensureEditorResources(windowState.mode)
         if (windowState.mode !== 'capsule') await tick()
         if (backend.isDesktop) {
@@ -341,6 +412,10 @@
               }, 180)
             }),
             await listen('qingjian://hide-requested', () => void hideWindow()),
+            await listen<AppSettings>('qingjian://settings-changed', (event) => {
+              settings = event.payload
+              if (!settings.autoHideAtScreenEdge) void expandDocked()
+            }),
             await listen<NoteWindowState>('qingjian://window-state-changed', (event) => {
               void (async () => {
                 if (event.payload.mode !== mode) {
@@ -368,7 +443,8 @@
   })
 
   onDestroy(() => {
-    clearTimeout(saveTimer); clearTimeout(geometryTimer); clearTimeout(moveTimer); clearTimeout(dockTimer); clearTimeout(toastTimer)
+    saveCoordinator?.dispose()
+    clearTimeout(geometryTimer); clearTimeout(moveTimer); clearTimeout(dockTimer); clearTimeout(toastTimer)
     cleanups.forEach((cleanup) => cleanup())
   })
 </script>
@@ -383,7 +459,7 @@
   on:mouseleave={scheduleDockCollapse}
 >
   {#if collapsed}
-    <div class="dock-strip" aria-label="展开停靠便签"></div>
+    <button class={`dock-strip edge-${windowState?.dockEdge || 'left'}`} aria-label="展开停靠便签" on:click={() => void expandDocked()}><span></span></button>
   {:else if loading}
     <div class="note-loading">轻</div>
   {:else if note && windowState}
@@ -392,10 +468,16 @@
       <section class="capsule-shell" on:dblclick={() => void switchMode('card')}>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="capsule-drag" on:mousedown={startWindowDrag}>
-          <i class="status-dot" class:dirty={saveState !== 'saved'}></i>
-          <div class="capsule-copy">
-            <strong>{note.title || '新便签'}</strong>
-            {#if capsulePreview}<span>{capsulePreview}</span>{/if}
+          <span class:error={saveState === 'error'} class="capsule-save-state" aria-live="polite">
+            {saveState === 'saving' ? '保存中' : saveState === 'dirty' ? '未保存' : saveState === 'error' ? '保存失败' : '已保存'}
+          </span>
+          <div class:compact={settings.capsuleDisplay === 'compact'} class="capsule-copy">
+            {#if settings.capsuleDisplay === 'compact'}
+              <strong>{capsuleCompact}</strong>
+            {:else}
+              <strong>{note.title || '新便签'}</strong>
+              {#if capsulePreview}<span>{capsulePreview}</span>{/if}
+            {/if}
           </div>
         </div>
         <button class="capsule-expand" aria-label="展开为卡片" on:click={() => void switchMode('card')}>展开</button>
@@ -404,22 +486,45 @@
       <section class="desktop-note-shell">
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <header class="note-window-titlebar" on:mousedown={startWindowDrag}>
-          <div class="mode-switcher" aria-label="便签形态">
-            <button on:click={() => void switchMode('capsule')}>胶囊</button>
-            <button class:active={mode === 'card'} on:click={() => void switchMode('card')}>卡片</button>
-            <button class:active={mode === 'editor'} on:click={() => void switchMode('editor')}>编辑</button>
-          </div>
+          <span class="note-mode-label">{mode === 'editor' ? '完整编辑' : '卡片'}</span>
           <div class="window-note-actions">
             <span class:error={saveState === 'error'} class="compact-save-state">
-              {saveState === 'saving' ? '保存中' : saveState === 'dirty' ? '未保存' : saveState === 'error' ? '失败' : ''}
+              {saveState === 'saving' ? '保存中' : saveState === 'dirty' ? '未保存' : saveState === 'error' ? '保存失败' : '已保存'}
             </span>
+            {#if saveState === 'error'}<button class="save-retry" on:click={() => void flushSave()}>重试</button>{/if}
             <button class:active={windowState.alwaysOnTop} aria-label="窗口置顶" on:click={toggleAlwaysOnTop}>
               {#if windowState.alwaysOnTop}<PinOff />{:else}<Pin />{/if}
             </button>
             <div class="note-popover-anchor" data-transient-root>
-              <button class:active={activePopover === 'opacity'} aria-label="调整背景与文字透明度" on:click={() => togglePopover('opacity')}>
-                <Blend />
-              </button>
+              <button class:active={Boolean(activePopover && activePopover !== 'format')} aria-label="更多" on:click={() => togglePopover('more')}><MoreHorizontal />{#if note.tags.length}<span class="tag-count">{note.tags.length}</span>{/if}</button>
+              {#if activePopover === 'more'}
+                <div class="note-more-menu" role="menu">
+                  <small>显示方式</small>
+                  <button on:click={() => void switchMode('capsule')}>胶囊浏览</button>
+                  <button on:click={() => void switchMode('card')}>卡片编辑</button>
+                  <button on:click={() => void switchMode('editor')}>完整编辑</button>
+                  <small>整理与窗口</small>
+                  <button on:click={toggleContentPin}>{#if note.pinned}<PinOff />取消内容置顶{:else}<Pin />内容置顶{/if}</button>
+                  <button on:click={() => (activePopover = 'tags')}><Tags />编辑标签</button>
+                  <button on:click={() => (activePopover = 'opacity')}><Blend />背景与文字透明度</button>
+                  <button disabled={locking} on:click={toggleLock}>{#if windowState.locked}<Unlock />解锁鼠标穿透{:else}<LockKeyhole />锁定并启用鼠标穿透{/if}</button>
+                  {#if mode === 'editor'}
+                    <button on:click={() => { closeTransient(); fileInput.click() }}><ImagePlus />插入图片</button>
+                    <small>复制内容</small>
+                    <button on:click={() => void copyContent('rich')}><Copy />保留源格式</button>
+                    <button on:click={() => void copyContent('text')}><Text />纯文本</button>
+                    <button on:click={() => void copyContent('markdown')}><Code2 />Markdown</button>
+                    <button on:click={() => void copyContent('html')}><Code2 />HTML 源码</button>
+                    <small>导出</small>
+                    <button on:click={() => void exportCurrent('markdown')}><FileDown />Markdown</button>
+                    <button on:click={() => void exportCurrent('html')}><FileDown />HTML</button>
+                    <button on:click={() => void exportCurrent('pdf')}><Download />PDF</button>
+                  {/if}
+                  <button on:click={() => void archiveCurrent()}><Archive />归档便签</button>
+                  <button on:click={() => void openAppSettings()}><Settings />打开设置</button>
+                  <button class="danger" on:click={() => void deleteCurrent()}><Trash2 />移到回收站</button>
+                </div>
+              {/if}
               {#if activePopover === 'opacity'}
                 <div class="opacity-popover">
                   <label>
@@ -435,13 +540,7 @@
                     <i>{#each [20, 60, 80, 100] as value}<button on:click={() => void setOpacity('text', value)}>{value}</button>{/each}</i>
                   </label>
                 </div>
-              {/if}
-            </div>
-            <div class="note-popover-anchor" data-transient-root>
-              <button class:active={activePopover === 'tags'} aria-label="编辑标签" on:click={() => togglePopover('tags')}>
-                <Tags />{#if note.tags.length}<span class="tag-count">{note.tags.length}</span>{/if}
-              </button>
-              {#if activePopover === 'tags'}
+              {:else if activePopover === 'tags'}
                 <div class="tag-popover">
                   <strong>便签标签</strong>
                   <input aria-label="便签标签" placeholder="输入标签，用逗号分隔" bind:value={tagDraft}
@@ -451,34 +550,7 @@
                 </div>
               {/if}
             </div>
-            <button aria-label={windowState.locked ? '解锁' : '锁定并穿透'} disabled={locking} on:click={toggleLock}>
-              {#if windowState.locked}<Unlock />{:else}<LockKeyhole />{/if}
-            </button>
-            <div class="note-popover-anchor" data-transient-root>
-              <button class:active={activePopover === 'more'} aria-label="更多" on:click={() => togglePopover('more')}><MoreHorizontal /></button>
-              {#if activePopover === 'more'}
-                <div class="note-more-menu" role="menu">
-                  <button on:click={toggleContentPin}>{#if note.pinned}<PinOff />取消内容置顶{:else}<Pin />内容置顶{/if}</button>
-                  {#if mode === 'editor'}
-                    <button on:click={() => { closeTransient(); fileInput.click() }}><ImagePlus />插入图片</button>
-                    <small>复制内容</small>
-                    <button on:click={() => void copyContent('rich')}><Copy />保留源格式</button>
-                    <button on:click={() => void copyContent('text')}><Text />纯文本</button>
-                    <button on:click={() => void copyContent('markdown')}><Code2 />Markdown</button>
-                    <button on:click={() => void copyContent('html')}><Code2 />HTML 源码</button>
-                    <small>导出</small>
-                    <button on:click={() => void exportCurrent('markdown')}><FileDown />Markdown</button>
-                    <button on:click={() => void exportCurrent('html')}><FileDown />HTML</button>
-                    <button on:click={() => void exportCurrent('pdf')}><Download />PDF</button>
-                  {/if}
-                  <button on:click={() => void archiveCurrent()}><Archive />归档便签</button>
-                  <button on:click={() => { closeTransient(); void backend.showHubWindow().then(() => emitDesktop('qingjian://settings')) }}><Settings />打开设置</button>
-                  <button class="danger" on:click={() => void deleteCurrent()}><Trash2 />移到回收站</button>
-                </div>
-              {/if}
-            </div>
-            <button aria-label="隐藏便签" on:click={() => void hideWindow()}><EyeOff /></button>
-            <button class="note-close" aria-label="隐藏便签" on:click={() => void hideWindow()}><X /></button>
+            <button class="note-close" aria-label="隐藏便签" disabled={pendingActions.has('hide-window')} use:tooltip={'隐藏便签'} on:click={() => void hideWindow()}><X /></button>
           </div>
         </header>
 
@@ -493,6 +565,7 @@
             <svelte:component
               this={EditorView} bind:this={editorView} noteId={note.id} content={note.content}
               defaultFontFamily={settings.defaultFontFamily} defaultFontSize={settings.defaultFontSize}
+              defaultLineHeight={settings.defaultLineHeight}
               onChange={scheduleSave}
               onReady={(instance: TiptapEditor) => {
                 editor = instance
@@ -502,9 +575,29 @@
                 }
               }}
               onSelectionChange={() => (toolbarVersion += 1)} onError={showToast}
+              onTextContextMenu={showTextContextMenu}
             />
           {/if}
         </div>
+        {#if activePopover === 'text'}
+          <div class="text-context-menu" data-transient-root role="menu" tabindex="-1" aria-label="选中文字格式"
+            style={`left:${textMenu.x}px;top:${textMenu.y}px`} on:mousedown|preventDefault|stopPropagation>
+            <small>文字格式</small>
+            <div>
+              <button class:active={editor?.isActive('bold')} on:click={() => formatSelectedText('bold')}><Bold />粗体</button>
+              <button class:active={editor?.isActive('italic')} on:click={() => formatSelectedText('italic')}><Italic />斜体</button>
+              <button class:active={editor?.isActive('underline')} on:click={() => formatSelectedText('underline')}><Underline />下划线</button>
+              <button class:active={editor?.isActive('strike')} on:click={() => formatSelectedText('strike')}><Strikethrough />删除线</button>
+            </div>
+            <small>文本类型</small>
+            <div>
+              <button on:click={() => formatSelectedText('paragraph')}><Pilcrow />正文</button>
+              <button on:click={() => formatSelectedText('task')}><CircleCheckBig />复选框</button>
+              <button on:click={() => formatSelectedText('bullet')}><List />项目符号</button>
+              <button on:click={() => formatSelectedText('ordered')}><ListOrdered />编号列表</button>
+            </div>
+          </div>
+        {/if}
       </section>
     {/if}
   {/if}
@@ -522,59 +615,72 @@
 <style>
   :global(html), :global(body), :global(#app) { width: 100%; height: 100%; overflow: hidden; }
   :global(#app) { padding: 0; }
-  .note-window-root { display:block; width:100%; height:100%; padding:7px; box-sizing:border-box; color:var(--text, #27251f); background:transparent; }
+  .note-window-root { display:block; width:100%; height:100%; padding:7px; box-sizing:border-box; color:var(--text, #18181b); background:transparent; }
   .note-window-root.collapsed { padding: 0; }
-  .dock-strip { width: 100%; height: 100%; background: linear-gradient(135deg, #f4d36e, #e9b83f); box-shadow: inset 0 0 0 1px rgba(91,68,16,.18); }
-  .note-loading { display:grid; place-items:center; height:100%; border-radius:16px; background:#fff8dc; color:#9b7218; font-weight:800; }
-  .capsule-shell, .desktop-note-shell { width:100%; height:100%; box-sizing:border-box; background:color-mix(in srgb, var(--paper, #fff8dc) var(--note-bg-percent), transparent); border:1px solid color-mix(in srgb, var(--line), var(--text) 12%); box-shadow:0 8px 26px rgba(48,39,18,.18); overflow:hidden; }
-  .capsule-shell { border-radius:999px; display:flex; align-items:center; padding:6px 8px 6px 14px; gap:8px; }
+  .dock-strip { position:relative; width:100%; height:100%; padding:0; border:1px solid color-mix(in srgb, var(--text, #18181b), transparent 82%); background:color-mix(in srgb, var(--paper, #ffffff) 88%, transparent); box-shadow:0 2px 10px rgba(15,23,42,.12); backdrop-filter:blur(10px); cursor:pointer; }
+  .dock-strip span { position:absolute; border-radius:999px; background:color-mix(in srgb, var(--text, #18181b), transparent 58%); }
+  .dock-strip.edge-left span, .dock-strip.edge-right span { width:3px; height:34px; top:50%; left:50%; transform:translate(-50%,-50%); }
+  .dock-strip.edge-top span, .dock-strip.edge-bottom span { width:34px; height:3px; top:50%; left:50%; transform:translate(-50%,-50%); }
+  .note-loading { display:grid; place-items:center; height:100%; border:1px solid var(--line); border-radius:16px; background:var(--paper, #ffffff); color:var(--accent, #52657d); font-weight:700; }
+  .capsule-shell, .desktop-note-shell { width:100%; height:100%; box-sizing:border-box; background:color-mix(in srgb, var(--paper, #ffffff) var(--note-bg-percent), transparent); border:1px solid color-mix(in srgb, var(--line), var(--text) 8%); box-shadow:0 6px 18px rgba(15,23,42,.10), 0 1px 2px rgba(15,23,42,.06); overflow:hidden; }
+  .capsule-shell { border-radius:999px; display:flex; align-items:center; padding:6px 8px 6px 14px; gap:9px; backdrop-filter:blur(14px); }
   .capsule-drag { min-width:0; flex:1; display:flex; align-items:center; gap:10px; cursor:grab; }
   .capsule-drag:active { cursor:grabbing; }
-  .status-dot { width:8px; height:8px; flex:none; border-radius:50%; background:#5dbe79; box-shadow:0 0 0 3px rgba(93,190,121,.14); }
-  .status-dot.dirty { background:#e1a72f; }
-  .capsule-copy { min-width:0; display:flex; align-items:baseline; gap:9px; white-space:nowrap; overflow:hidden; color:color-mix(in srgb, var(--text, #27251f) var(--note-text-percent), transparent); }
-  .capsule-copy strong { max-width:48%; overflow:hidden; text-overflow:ellipsis; font-size:13px; }
-  .capsule-copy span { flex:1; overflow:hidden; text-overflow:ellipsis; color:var(--muted); font-size:12px; }
-  .capsule-expand { flex:none; border:0; border-radius:999px; padding:7px 11px; background:var(--accent-soft); color:var(--text); font-size:11px; }
+  .capsule-save-state { flex:none; color:var(--muted); font-size:9px; line-height:14px; }
+  .capsule-save-state.error { color:var(--danger); font-weight:650; }
+  .capsule-copy { min-width:0; flex:1; display:grid; align-content:center; gap:1px; overflow:hidden; color:color-mix(in srgb, var(--text, #18181b) var(--note-text-percent), transparent); }
+  .capsule-copy strong { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; line-height:16px; font-weight:650; }
+  .capsule-copy span { display:-webkit-box; overflow:hidden; color:color-mix(in srgb, var(--muted) var(--note-text-percent), transparent); -webkit-box-orient:vertical; -webkit-line-clamp:2; line-clamp:2; white-space:pre-wrap; font-size:11px; line-height:14px; }
+  .capsule-copy.compact strong { font-size:12px; font-weight:560; }
+  .capsule-expand { flex:none; border:0; border-radius:999px; padding:7px 11px; background:color-mix(in srgb, var(--accent-soft), var(--paper) 32%); color:var(--text); font-size:11px; font-weight:600; cursor:pointer; }
+  .capsule-expand:hover { background:var(--accent-soft); }
   .desktop-note-shell { border-radius:16px; display:flex; flex-direction:column; }
-  .note-window-titlebar { min-height:39px; display:flex; align-items:center; justify-content:space-between; padding:0 6px 0 9px; border-bottom:1px solid var(--line); background:color-mix(in srgb, var(--paper, #fff8dc) 78%, transparent); cursor:grab; }
+  .note-window-titlebar { min-height:39px; display:flex; align-items:center; justify-content:space-between; padding:0 6px 0 9px; border-bottom:1px solid var(--line); background:color-mix(in srgb, var(--paper, #ffffff) 78%, transparent); cursor:grab; }
+  .note-mode-label { color:var(--muted); font-size:11px; font-weight:600; }
   .note-window-titlebar:active { cursor:grabbing; }
   .mode-switcher { display:flex; padding:2px; border-radius:9px; background:color-mix(in srgb, var(--sidebar), transparent 20%); }
-  .mode-switcher button { border:0; background:transparent; padding:5px 8px; border-radius:7px; color:var(--muted); font-size:11px; }
+  .mode-switcher button { border:0; background:transparent; min-height:28px; padding:5px 8px; border-radius:7px; color:var(--muted); font-size:12px; }
   .mode-switcher button.active { background:var(--paper); color:var(--text); box-shadow:0 1px 4px rgba(57,44,12,.12); }
   .window-note-actions { display:flex; align-items:center; gap:1px; }
-  .window-note-actions > button, .note-popover-anchor > button { width:28px; height:28px; border:0; border-radius:8px; display:grid; place-items:center; background:transparent; color:var(--muted); }
+  .window-note-actions > button, .note-popover-anchor > button { width:30px; height:30px; border:0; border-radius:8px; display:grid; place-items:center; background:transparent; color:var(--muted); }
   .window-note-actions button:hover, .window-note-actions button.active { background:var(--accent-soft); color:var(--text); }
   .window-note-actions :global(svg) { width:14px; height:14px; }
-  .tag-count { position:absolute; right:2px; top:2px; min-width:11px; height:11px; padding:0 2px; box-sizing:border-box; border-radius:999px; background:#dcae35; color:#fff; font-size:7px; line-height:11px; }
-  .compact-save-state { min-width:34px; text-align:right; margin-right:3px; font-size:9px; color:var(--muted); }
-  .compact-save-state.error { color:#c95545; }
+  .tag-count { position:absolute; right:2px; top:2px; min-width:11px; height:11px; padding:0 2px; box-sizing:border-box; border-radius:999px; background:var(--accent); color:var(--paper); font-size:7px; line-height:11px; }
+  .compact-save-state { min-width:38px; text-align:right; margin-right:3px; font-size:11px; color:var(--muted); }
+  .compact-save-state.error { color:var(--danger); }
+  .save-retry { width:auto !important; padding:0 6px !important; color:var(--danger) !important; font-size:10px !important; }
   .note-popover-anchor { position:relative; }
-  .opacity-popover, .tag-popover, .note-more-menu { position:fixed; z-index:30; right:8px; top:44px; max-width:calc(100vw - 16px); border:1px solid rgba(91,70,19,.14); border-radius:12px; background:var(--paper, #fffdf5); color:var(--text, #27251f); box-shadow:0 12px 32px rgba(53,40,10,.2); }
+  .opacity-popover, .tag-popover, .note-more-menu { position:fixed; z-index:30; right:8px; top:44px; max-width:calc(100vw - 16px); border:1px solid var(--line); border-radius:12px; background:var(--paper, #ffffff); color:var(--text, #18181b); box-shadow:0 12px 32px rgba(15,23,42,.16); }
   .opacity-popover { width:220px; padding:12px; display:grid; gap:13px; }
   .opacity-popover label { display:grid; gap:7px; }
-  .opacity-popover label > span { display:flex; justify-content:space-between; align-items:center; font-size:11px; }
-  .opacity-popover label > span b { color:var(--muted, #887a59); font-size:10px; }
-  .opacity-popover input { width:100%; margin:0; accent-color:#d2a62e; }
+  .opacity-popover label > span { display:flex; justify-content:space-between; align-items:center; font-size:12px; }
+  .opacity-popover label > span b { color:var(--muted, #6b7280); font-size:12px; }
+  .opacity-popover input { width:100%; margin:0; accent-color:var(--accent); }
   .opacity-popover i { display:flex; gap:5px; font-style:normal; }
-  .opacity-popover i button { flex:1; min-height:26px; border:1px solid var(--line); border-radius:7px; background:var(--sidebar); color:var(--text); padding:4px; font-size:10px; }
+  .opacity-popover i button { flex:1; min-height:28px; border:1px solid var(--line); border-radius:7px; background:var(--sidebar); color:var(--text); padding:4px; font-size:12px; }
   .tag-popover { width:220px; padding:12px; display:grid; gap:8px; }
   .tag-popover strong { font-size:12px; }
   .tag-popover input { width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:8px; background:var(--sidebar); color:inherit; padding:8px 9px; outline:0; }
-  .tag-popover input:focus { border-color:#c69a27; box-shadow:0 0 0 3px rgba(198,154,39,.12); }
-  .tag-popover small { color:var(--muted, #887a59); font-size:9px; }
-  .tag-popover .tag-save { justify-self:end; min-height:28px; border:0; border-radius:7px; background:#e6bd4e; color:#43330d; padding:5px 10px; }
+  .tag-popover input:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent), transparent 86%); }
+  .tag-popover small { color:var(--muted, #6b7280); font-size:11px; }
+  .tag-popover .tag-save { justify-self:end; min-height:28px; border:0; border-radius:7px; background:var(--accent); color:var(--paper); padding:5px 10px; }
   .note-more-menu { width:180px; max-height:min(480px, calc(100vh - 48px)); overflow:auto; padding:6px; }
   .note-more-menu button { width:100%; display:flex; align-items:center; gap:8px; border:0; border-radius:8px; background:transparent; padding:8px; color:var(--text); font-size:12px; text-align:left; }
   .note-more-menu button:hover { background:var(--sidebar); }
-  .note-more-menu button.danger { color:#b94b42; }
+  .note-more-menu button.danger { color:var(--danger); }
   .note-more-menu small { display:block; padding:7px 8px 3px; color:var(--muted); font-size:9px; text-transform:uppercase; }
   .note-window-editor { min-height:0; flex:1; overflow:auto; }
   .note-window-root :global(.format-toolbar) { background:color-mix(in srgb, var(--paper) 84%, transparent); }
   .note-window-editor :global(.editor-host) { min-height:100%; }
-  .note-window-editor :global(.tiptap) { min-height:100%; box-sizing:border-box; padding:14px 16px 24px; outline:0; color:color-mix(in srgb, var(--text, #27251f) var(--note-text-percent), transparent); caret-color:var(--text, #27251f); }
+  .note-window-editor :global(.tiptap) { min-height:100%; box-sizing:border-box; padding:14px 16px 24px; outline:0; color:color-mix(in srgb, var(--text, #18181b) var(--note-text-percent), transparent); caret-color:var(--text, #18181b); }
   .note-window-editor :global(.tiptap img) { opacity:1; }
   .card-editor :global(.tiptap) { padding-top:12px; font-size:14px; }
+  .text-context-menu { position:fixed; z-index:42; width:180px; padding:6px; border:1px solid var(--window-edge); border-radius:12px; background:var(--surface-raised, var(--paper)); color:var(--text); box-shadow:0 12px 34px rgba(28,24,18,.2); }
+  .text-context-menu small { display:block; padding:5px 7px 3px; color:var(--muted); font-size:10px; font-weight:650; }
+  .text-context-menu > div { display:grid; grid-template-columns:1fr 1fr; gap:2px; }
+  .text-context-menu button { min-height:32px; display:flex; align-items:center; gap:6px; padding:0 7px; border:0; border-radius:7px; background:transparent; color:var(--text); cursor:pointer; font-size:11px; text-align:left; }
+  .text-context-menu button:hover, .text-context-menu button.active { background:var(--accent-soft); }
+  .text-context-menu :global(svg) { width:13px; height:13px; flex:none; }
   .mode-card .note-window-titlebar { min-height:36px; }
   @media (max-width: 330px), (max-height: 210px) {
     .note-window-root { padding:4px; }
