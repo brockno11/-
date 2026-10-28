@@ -4,7 +4,10 @@ src-tauri/target/
 src-tauri/target-redesign/
 .vite/
 coverage/
-release/current/
+.reviews/
+__pycache__/
+*.py[cod]
+/release/
 *-qa.png
 debug-standalone-startup.png
 *.log
