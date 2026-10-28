@@ -6,8 +6,11 @@ const cargoText = readFileSync('src-tauri/Cargo.toml', 'utf8')
 const cargoVersion = cargoText.match(/^version\s*=\s*"([^"]+)"/m)?.[1]
 const versions = new Map([
   ['package.json', packageVersion],
+  ['package-lock.json', JSON.parse(readFileSync('package-lock.json', 'utf8')).version],
+  ['package-lock.json root', JSON.parse(readFileSync('package-lock.json', 'utf8')).packages?.['']?.version],
   ['src-tauri/tauri.conf.json', tauriVersion],
   ['src-tauri/Cargo.toml', cargoVersion],
+  ['src-tauri/Cargo.lock', readFileSync('src-tauri/Cargo.lock', 'utf8').match(/\[\[package\]\]\s+name = "qingjian"\s+version = "([^"]+)"/)?.[1]],
 ])
 
 const expected = packageVersion

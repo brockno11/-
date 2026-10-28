@@ -15,11 +15,6 @@ use tauri::{
 
 fn request_quit(app: &tauri::AppHandle) {
     let _ = app.emit("qingjian://quit-requested", ());
-    let fallback = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(4));
-        fallback.exit(0);
-    });
 }
 
 fn request_show(app: &tauri::AppHandle) {
@@ -150,6 +145,10 @@ pub fn run(instance_signal: Option<isize>) {
             commands::get_note,
             commands::create_note,
             commands::save_note,
+            commands::set_note_tags,
+            commands::get_note_preferences,
+            commands::set_note_appearance,
+            commands::save_note_view_state,
             commands::delete_note,
             commands::restore_note,
             commands::batch_note_action,
@@ -181,6 +180,10 @@ pub fn run(instance_signal: Option<isize>) {
             windows::note_window_ready,
             windows::get_note_window_state,
             windows::list_visible_note_windows,
+            windows::list_live_note_ids,
+            windows::begin_note_operation,
+            windows::end_note_operation,
+            windows::release_idle_note_window,
             windows::save_note_window_geometry,
             windows::set_note_window_mode,
             windows::set_note_window_always_on_top,

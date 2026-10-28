@@ -14,10 +14,11 @@
   import SettingsModal from './components/SettingsModal.svelte'
   import UpdateModal from './components/UpdateModal.svelte'
   import { backend } from './lib/backend'
+  import { waitForNoteSaves, type SaveBarrierFailure, type SaveBarrierReady } from './lib/save-barrier'
   import { tooltip } from './lib/tooltip'
   import { themeClass as resolveThemeClass } from './lib/theme'
   import { DEFAULT_SETTINGS, isReservedGlobalHotkey } from './lib/types'
-  import type { AppSettings, Folder, NoteSummary, NoteWindowMode, Tag, WorkspaceState } from './lib/types'
+  import type { AppSettings, Folder, NoteSummary, NoteWindowMode, NoteChange, Tag, WorkspaceState } from './lib/types'
   import {
     checkForAppUpdate, downloadAndInstallAppUpdate, getCurrentAppVersion,
     type AppUpdateInfo, type UpdateDownloadProgress,
@@ -28,6 +29,13 @@
   type ContextMenu = { note: NoteSummary; x: number; y: number } | null
   type UndoAction = { label: string; run: () => Promise<void> }
 
+  let lifecycleBusy = false
+  let searchMatches: Set<string> | null = null
+  let searchGeneration = 0
+  let searchTimer: ReturnType<typeof setTimeout> | undefined
+  let searching = false
+  let searchError = ''
+  let refreshGeneration = 0
   let notes: NoteSummary[] = []
   let folders: Folder[] = []
   let workspace: WorkspaceState = { openNoteIds: [], activeNoteId: null }
@@ -54,9 +62,8 @@
   let editingFolderId = ''
   let folderDraft = ''
   let toastTimer: ReturnType<typeof setTimeout> | undefined
-  let quitFallback: ReturnType<typeof setTimeout> | undefined
-  let pendingQuitIds = new Set<string>()
-  let appVersion = '0.7.0'
+  let quitting = false
+  let appVersion = '0.8.0'
   let checkingUpdate = false
   let availableUpdate: AppUpdateInfo | null = null
   let installingUpdate = false
@@ -69,6 +76,7 @@
   const compactPreview = !backend.isDesktop
     && new URLSearchParams(window.location.search).get('preview') === 'compact'
 
+  $: scheduleSearch(query)
   $: themeClass = resolveThemeClass(settings.themeId)
   $: activeNotes = notes.filter((note) => !note.trashedAt)
   $: trashNotes = notes.filter((note) => note.trashedAt)
@@ -81,7 +89,7 @@
     trash: trashNotes.length,
   }
   $: visibleNotes = notes
-    .filter((note) => matchesCurrentView(note, view, query, selectedFolderId, selectedTag))
+    .filter((note) => (!query.trim() || searchMatches?.has(note.id)) && matchesCurrentView(note, view, selectedFolderId, selectedTag))
     .sort((a, b) => sortNotes(a, b, sortMode))
   $: pinnedVisibleNotes = view === 'notes' ? visibleNotes.filter((note) => note.pinned) : []
   $: regularVisibleNotes = view === 'notes' ? visibleNotes.filter((note) => !note.pinned) : visibleNotes
@@ -92,7 +100,7 @@
   $: selectedCount = selectedIds.size
   $: filterCount = Number(selectedFolderId !== undefined) + Number(Boolean(selectedTag))
   $: currentTitle = view === 'notes' ? '全部便签'
-    : view === 'pinned' ? '置顶便签'
+    : view === 'pinned' ? '列表置顶'
       : view === 'archived' ? '归档'
         : '回收站'
   $: currentHint = view === 'notes' ? '最近更新的内容'
@@ -112,6 +120,7 @@
 
   async function runHubAction<T>(key: string, action: () => Promise<T>): Promise<T | undefined> {
     if (pendingActions.has(key)) return
+    if (lifecycleBusy) { showToast('正在保存便签，请稍后重试'); return }
     pendingActions = new Set(pendingActions).add(key)
     try {
       return await action()
@@ -189,16 +198,9 @@
   function matchesCurrentView(
     note: NoteSummary,
     currentView: HubView,
-    currentQuery: string,
     folderId: string | null | undefined,
     tagName: string,
   ) {
-    const search = currentQuery.trim().toLocaleLowerCase()
-    if (search && !(
-      note.title.toLocaleLowerCase().includes(search)
-      || note.preview.toLocaleLowerCase().includes(search)
-      || note.tags.some((tag) => tag.name.toLocaleLowerCase().includes(search))
-    )) return false
     if (currentView === 'trash') return Boolean(note.trashedAt)
     if (note.trashedAt) return false
     if (currentView === 'archived' && !note.archived) return false
@@ -224,17 +226,84 @@
     }).format(date)
   }
 
+  function scheduleSearch(value: string) {
+    const generation = ++searchGeneration
+    clearTimeout(searchTimer)
+    searchMatches = value.trim() ? new Set() : null
+    searching = Boolean(value.trim())
+    searchError = ''
+    if (!value.trim()) return
+    searchTimer = setTimeout(() => void runSearch(value, generation), 120)
+  }
+
+  async function runSearch(value: string, generation: number) {
+    try {
+      const results = await backend.listNotes(value, true, true)
+      if (generation !== searchGeneration) return
+      searchMatches = new Set(results.map(note => note.id))
+    } catch (error) {
+      if (generation === searchGeneration) searchError = error instanceof Error ? error.message : '搜索失败，请重试'
+    } finally {
+      if (generation === searchGeneration) searching = false
+    }
+  }
+
   async function refresh() {
+    const generation = ++refreshGeneration
     const [nextNotes, nextFolders, nextWorkspace, visibleWindows] = await Promise.all([
-      backend.listNotes('', true, true),
-      backend.listFolders(),
-      backend.getWorkspaceState(),
-      backend.listVisibleNoteWindows(),
+      backend.listNotes('', true, true), backend.listFolders(),
+      backend.getWorkspaceState(), backend.listVisibleNoteWindows(),
     ])
-    notes = nextNotes
-    folders = nextFolders
-    workspace = nextWorkspace
-    visibleDesktopNotes = new Set(visibleWindows.map((state) => state.noteId))
+    if (generation !== refreshGeneration) return
+    notes = nextNotes; folders = nextFolders; workspace = nextWorkspace
+    visibleDesktopNotes = new Set(visibleWindows.map(state => state.noteId))
+    scheduleSearch(query)
+  }
+
+  async function handleNoteChange(change: NoteChange | undefined) {
+    if (!change || change.kind === 'collection') { await refresh(); return }
+    if (change.kind === 'appearance') return
+    try {
+      const updated = await Promise.all(change.noteIds.map(id => backend.getNote(id)))
+      const byId = new Map(updated.map(note => [note.id, note]))
+      notes = notes.map(note => byId.get(note.id) ?? note)
+      scheduleSearch(query)
+    } catch { await refresh() }
+  }
+
+  async function refreshVisibleWindows() {
+    const windows = await backend.listVisibleNoteWindows()
+    visibleDesktopNotes = new Set(windows.map(state => state.noteId))
+  }
+
+  async function withSavedNotes<T>(operationName: string, action: () => Promise<T>, selected?: string[], processWillExit = false): Promise<T> {
+    if (!backend.isDesktop) return action()
+    if (lifecycleBusy) throw new Error('正在保存便签，请稍后重试')
+    lifecycleBusy = true
+    const operationId = crypto.randomUUID()
+    let completed = false
+    try {
+      await backend.beginNoteOperation(operationId)
+      const live = await backend.listLiveNoteIds()
+      const noteIds = selected ? live.filter(id => selected.includes(id)) : live
+      await waitForNoteSaves({
+        noteIds, operationId, operationName,
+        subscribeReady: handler => listen<SaveBarrierReady>('qingjian://note-save-ready', event => handler(event.payload)),
+        subscribeFailed: handler => listen<SaveBarrierFailure>('qingjian://note-save-failed', event => handler(event.payload)),
+        requestSave: () => emitDesktop('qingjian://prepare-save', { operationId, operationName, noteIds }),
+      })
+      const result = await action()
+      completed = true
+      return result
+    } finally {
+      if (!completed || !processWillExit) {
+        try { await backend.endNoteOperation(operationId) }
+        finally {
+          await emitDesktop('qingjian://release-save', { operationId }).catch(() => undefined)
+          lifecycleBusy = false
+        }
+      }
+    }
   }
 
   function startWindowDrag(event: MouseEvent) {
@@ -244,7 +313,7 @@
     void getCurrentWindow().startDragging()
   }
 
-  async function openNote(id: string, preferredMode?: NoteWindowMode) {
+  async function openNote(id: string, preferredMode?: NoteWindowMode, sourceNoteId?: string) {
     await runHubAction(`open:${id}`, async () => {
       const note = notes.find((item) => item.id === id)
       if (!note || note.trashedAt) return
@@ -254,18 +323,18 @@
         activeNoteId: id,
       }
       await backend.saveWorkspaceState(workspace)
-      await backend.openNoteWindow(id, preferredMode)
+      await backend.openNoteWindow(id, preferredMode, sourceNoteId)
       visibleDesktopNotes = new Set(visibleDesktopNotes).add(id)
     })
   }
 
-  async function createNote() {
+  async function createNote(sourceNoteId?: string) {
     await runHubAction('create-note', async () => {
       const folderId = selectedFolderId !== undefined && view !== 'trash' ? selectedFolderId : null
       const note = await backend.createNote(folderId)
       await refresh()
-      await emitDesktop('qingjian://notes-changed')
-      await openNote(note.id, 'card')
+      await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
+      await openNote(note.id, 'card', sourceNoteId)
     })
   }
 
@@ -312,7 +381,8 @@
     event.preventDefault()
     event.stopPropagation()
     filtersOpen = false
-    contextMenuSource = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+    contextMenuSource = event.currentTarget instanceof HTMLElement ? event.currentTarget
+      : document.activeElement instanceof HTMLElement ? document.activeElement : null
     contextMenu = {
       note,
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)),
@@ -337,23 +407,23 @@
       const delta = event.key === 'ArrowDown' ? 1 : -1
       buttons[(current + delta + buttons.length) % buttons.length]?.focus()
     } else if (event.key === 'Escape') {
-      event.preventDefault()
+      event.preventDefault(); event.stopPropagation()
       closeContextMenu(true)
     }
   }
 
   async function trashMany(ids: string[]) {
     await runHubAction('note-mutation', async () => {
-      await backend.batchNoteAction(ids, 'trash')
+      await withSavedNotes('移到回收站', () => backend.batchNoteAction(ids, 'trash'), ids)
       clearSelection()
       contextMenu = null
       await refresh()
-      await emitDesktop('qingjian://notes-changed')
+      await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
       showToast(ids.length > 1 ? `已将 ${ids.length} 条便签移到回收站` : '已移到回收站', {
         label: '删除',
         run: async () => {
           await backend.batchNoteAction(ids, 'restore')
-          await refresh(); await emitDesktop('qingjian://notes-changed')
+          await refresh(); await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
         },
       })
     })
@@ -365,12 +435,12 @@
       clearSelection()
       contextMenu = null
       await refresh()
-      await emitDesktop('qingjian://notes-changed')
+      await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
       showToast(ids.length > 1 ? `已恢复 ${ids.length} 条便签` : '便签已恢复', {
         label: '恢复',
         run: async () => {
-          await backend.batchNoteAction(ids, 'trash')
-          await refresh(); await emitDesktop('qingjian://notes-changed')
+          await withSavedNotes('移到回收站', () => backend.batchNoteAction(ids, 'trash'), ids)
+          await refresh(); await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
         },
       })
     })
@@ -378,16 +448,16 @@
 
   async function archiveMany(ids: string[], archived: boolean) {
     await runHubAction('note-mutation', async () => {
-      await backend.batchNoteAction(ids, archived ? 'archive' : 'unarchive')
+      await withSavedNotes(archived ? '归档' : '移回便签', () => backend.batchNoteAction(ids, archived ? 'archive' : 'unarchive'), ids)
       clearSelection()
       contextMenu = null
       await refresh()
-      await emitDesktop('qingjian://notes-changed')
+      await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
       showToast(archived ? '已归档' : '已移回全部便签', {
         label: archived ? '归档' : '移回',
         run: async () => {
-          await backend.batchNoteAction(ids, archived ? 'unarchive' : 'archive')
-          await refresh(); await emitDesktop('qingjian://notes-changed')
+          await withSavedNotes('撤销归档', () => backend.batchNoteAction(ids, archived ? 'unarchive' : 'archive'), ids)
+          await refresh(); await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
         },
       })
     })
@@ -397,8 +467,8 @@
     await runHubAction('note-mutation', async () => {
       await backend.setNotePinned(note.id, !note.pinned)
       contextMenu = null
-      await refresh()
-      await emitDesktop('qingjian://notes-changed')
+      await handleNoteChange({ noteIds: [note.id], kind: 'metadata' })
+      await emitDesktop('qingjian://notes-changed', { noteIds: [note.id], kind: 'metadata' })
     })
   }
 
@@ -410,11 +480,11 @@
       : window.confirm(`永久删除 ${ids.length} 条便签？`)
     if (!approved) return
     await runHubAction('note-mutation', async () => {
-      await backend.batchNoteAction(ids, 'permanent-delete')
+      await withSavedNotes('永久删除', () => backend.batchNoteAction(ids, 'permanent-delete'), ids)
       clearSelection()
       contextMenu = null
       await refresh()
-      await emitDesktop('qingjian://notes-changed')
+      await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
       showToast('便签已永久删除')
     })
   }
@@ -428,10 +498,10 @@
       : window.confirm('清空回收站？')
     if (!approved) return
     await runHubAction('note-mutation', async () => {
-      await backend.emptyTrash()
+      await withSavedNotes('清空回收站', () => backend.emptyTrash())
       clearSelection()
       await refresh()
-      await emitDesktop('qingjian://notes-changed')
+      await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
       showToast('回收站已清空')
     })
   }
@@ -509,7 +579,7 @@
     await backend.reorderNote(draggedNoteId, note.id)
     handleDragEnd()
     await refresh()
-    await emitDesktop('qingjian://notes-changed')
+    await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
     showToast('便签顺序已更新')
   }
 
@@ -524,7 +594,7 @@
     await backend.moveNote(draggedNoteId, folderId)
     handleDragEnd()
     await refresh()
-    await emitDesktop('qingjian://notes-changed')
+    await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
     showToast(folderId ? '便签已移入文件夹' : '便签已移到未分类')
   }
 
@@ -611,22 +681,16 @@
     }
   }
 
-  async function flushNotesForUpdate() {
-    const visible = await backend.listVisibleNoteWindows()
-    const pending = new Set(visible.map((state) => state.noteId))
-    if (!pending.size) return
-    let resolveReady: () => void = () => {}
-    const ready = new Promise<void>((resolve) => { resolveReady = resolve })
-    const unlisten = await listen<string>('qingjian://note-update-save-ready', (event) => {
-      pending.delete(event.payload)
-      if (!pending.size) resolveReady()
-    })
-    await emitDesktop('qingjian://flush-for-update')
-    await Promise.race([
-      ready,
-      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
-    ])
-    unlisten()
+  async function requestQuitSafely() {
+    if (quitting) return
+    quitting = true
+    try {
+      await withSavedNotes('退出轻笺', () => backend.quit(), undefined, true)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '退出已取消：便签未能安全保存', null)
+    } finally {
+      quitting = false
+    }
   }
 
   async function installAvailableUpdate() {
@@ -635,8 +699,7 @@
     updateError = ''
     updateProgress = { downloadedBytes: 0, finished: false }
     try {
-      await flushNotesForUpdate()
-      await downloadAndInstallAppUpdate((progress) => (updateProgress = progress))
+      await withSavedNotes('安装更新', () => downloadAndInstallAppUpdate((progress) => (updateProgress = progress)), undefined, true)
     } catch (error) {
       updateError = error instanceof Error ? error.message : String(error)
       installingUpdate = false
@@ -650,8 +713,10 @@
       filters: [{ name: '轻笺备份', extensions: ['qingjian-backup'] }],
     }) : null
     if (!destination) return
-    await backend.exportBackup(destination)
-    showToast('完整备份已导出')
+    await runHubAction('backup', async () => {
+      await withSavedNotes('导出备份', () => backend.exportBackup(destination))
+      showToast('完整备份已导出')
+    })
   }
 
   async function restoreBackup() {
@@ -660,10 +725,12 @@
       filters: [{ name: '轻笺备份', extensions: ['qingjian-backup'] }],
     }) : null
     if (!source || Array.isArray(source)) return
-    await backend.restoreBackup(source, false)
-    await refresh()
-    await emitDesktop('qingjian://notes-changed')
-    showToast('备份已合并导入')
+    await runHubAction('restore', async () => {
+      await withSavedNotes('恢复备份', () => backend.restoreBackup(source, false))
+      await refresh()
+      await emitDesktop('qingjian://notes-changed', { noteIds: [], kind: 'collection' })
+      showToast('备份已合并导入')
+    })
   }
 
   function handleKeyboard(event: KeyboardEvent) {
@@ -673,6 +740,8 @@
       if (filtersOpen) { filtersOpen = false; return }
       if (contextMenu) { contextMenu = null; return }
       if (selectionMode) clearSelection()
+    } else if (settingsOpen) {
+      return
     } else if (event.ctrlKey && event.key.toLowerCase() === 'k') {
       event.preventDefault(); searchInput?.focus()
     } else if (event.ctrlKey && event.key.toLowerCase() === 'n') {
@@ -704,27 +773,14 @@
         // Register lifecycle events before optional global shortcuts. A shortcut may be
         // occupied by another app, but that must never leave the workbench half-started.
         cleanups.push(...await Promise.all([
-          listen('qingjian://notes-changed', () => void refresh()),
-          listen('qingjian://note-windows-changed', () => void refresh()),
+          listen<NoteChange>('qingjian://notes-changed', event => void handleNoteChange(event.payload)),
+          listen('qingjian://note-windows-changed', () => void refreshVisibleWindows().catch(() => undefined)),
           listen<WorkspaceState>('qingjian://workspace-changed', (event) => (workspace = event.payload)),
-          listen('qingjian://new-note', () => void createNote()),
+          listen<{ sourceNoteId?: string } | null>('qingjian://new-note', event => void createNote(event.payload?.sourceNoteId)),
           listen('qingjian://settings', openSettings),
           listen('qingjian://check-update', () => void runUpdateCheck(true)),
-          listen('qingjian://quit-requested', () => {
-            void (async () => {
-              const visible = await backend.listVisibleNoteWindows()
-              pendingQuitIds = new Set(visible.map((state) => state.noteId))
-              await emitDesktop('qingjian://flush-and-quit')
-              if (!pendingQuitIds.size) { await backend.quit(); return }
-              clearTimeout(quitFallback)
-              quitFallback = setTimeout(() => void backend.quit(), 2000)
-            })()
-          }),
-          listen<string>('qingjian://note-save-ready', (event) => {
-            pendingQuitIds.delete(event.payload)
-            pendingQuitIds = new Set(pendingQuitIds)
-            if (!pendingQuitIds.size) { clearTimeout(quitFallback); void backend.quit() }
-          }),
+          listen('qingjian://quit-requested', () => void requestQuitSafely()),
+          listen<string>('qingjian://operation-blocked', event => showToast(event.payload)),
         ]))
 
         const unavailableHotkeys: string[] = []
@@ -764,8 +820,9 @@
       cleanups.forEach((cleanup) => cleanup())
       if (registeredHotkey) void unregister(registeredHotkey)
       registeredRescueHotkeys.forEach((hotkey) => void unregister(hotkey))
-      clearTimeout(quitFallback)
       clearTimeout(startupUpdateTimer)
+      clearTimeout(searchTimer)
+      searchGeneration++
     }
   })
 </script>
@@ -861,7 +918,7 @@
       </nav>
 
       <div class="workbench-heading">
-        <div><h1>{currentTitle}</h1><p>{query ? `找到 ${visibleNotes.length} 条结果` : `${currentHint} · ${visibleNotes.length} 条`}</p></div>
+        <div><h1>{currentTitle}</h1><p role="status" aria-live="polite" aria-atomic="true">{#if query}找到 {visibleNotes.length} 条结果{:else}<span class="heading-context">{currentHint} · </span>{visibleNotes.length} 条<span class="heading-compact-label">便签</span>{/if}</p></div>
         <div class="workbench-heading-actions">
           <label class="sort-control" aria-label="便签排序">
             <Clock3 />
@@ -873,13 +930,13 @@
             <ChevronDown />
           </label>
           {#if view !== 'trash'}
-            <button class="compact-filter-trigger" class:active={filtersOpen || filterCount > 0} on:click|stopPropagation={() => { closeContextMenu(); filtersOpen = !filtersOpen }}>
+            <button aria-label="整理与筛选" class="compact-filter-trigger" class:active={filtersOpen || filterCount > 0} on:click|stopPropagation={() => { closeContextMenu(); filtersOpen = !filtersOpen }}>
               <SlidersHorizontal /><span>整理</span>{#if filterCount}<small>{filterCount}</small>{/if}
             </button>
           {:else if trashNotes.length}
             <button class="danger-text" on:click={() => void emptyTrash()}><Trash2 /><span>清空</span></button>
           {/if}
-          <button class:active={selectionMode} on:click={() => selectionMode ? clearSelection() : (selectionMode = true)}><Check /><span>{selectionMode ? '取消' : '选择'}</span></button>
+          <button aria-label={selectionMode ? '退出选择模式' : '选择便签'} class:active={selectionMode} on:click={() => selectionMode ? clearSelection() : (selectionMode = true)}><Check /><span>{selectionMode ? '取消' : '选择'}</span></button>
         </div>
       </div>
 
@@ -891,16 +948,17 @@
         </div>
       {/if}
 
-      <div class="workbench-note-list" aria-busy={loading}>
+      <div class="workbench-note-list" aria-busy={loading || searching}>
+        {#if loading || searching}<p class="workbench-progress" role="status">{searching ? '正在搜索…' : '正在读取便签…'}</p>{/if}
         {#if pinnedVisibleNotes.length}
-          <div class="note-group-label"><Pin />置顶</div>
+          <div class="note-group-label"><Star />列表置顶</div>
           {#each pinnedVisibleNotes as note (note.id)}
             <HubNoteCard
               {note} {folders} {query} selectionMode={selectionMode || view === 'trash'}
               selected={selectedIds.has(note.id)} active={!selectionMode && workspace.activeNoteId === note.id}
               desktopVisible={visibleDesktopNotes.has(note.id)} dragEnabled={canDragNotes}
               dropBefore={dropBeforeId === note.id} formattedDate={formatNoteDate(note.trashedAt || note.updatedAt)}
-              onActivate={handleCardClick} onToggleSelection={() => toggleSelection(note.id)} onTogglePin={togglePin}
+              onActivate={handleCardClick} onTogglePin={togglePin}
               onOpenMenu={(event) => void showContextMenu(event, note)} onContextMenu={(event) => void showContextMenu(event, note)}
               onDragStart={handleDragStart} onDragOver={handleDragOver} onDrop={handleDrop} onDragEnd={handleDragEnd}
             />
@@ -913,17 +971,18 @@
             selected={selectedIds.has(note.id)} active={!selectionMode && workspace.activeNoteId === note.id}
             desktopVisible={visibleDesktopNotes.has(note.id)} dragEnabled={canDragNotes}
             dropBefore={dropBeforeId === note.id} formattedDate={formatNoteDate(note.trashedAt || note.updatedAt)}
-            onActivate={handleCardClick} onToggleSelection={() => toggleSelection(note.id)} onTogglePin={togglePin}
+            onActivate={handleCardClick} onTogglePin={togglePin}
             onOpenMenu={(event) => void showContextMenu(event, note)} onContextMenu={(event) => void showContextMenu(event, note)}
             onDragStart={handleDragStart} onDragOver={handleDragOver} onDrop={handleDrop} onDragEnd={handleDragEnd}
           />
         {:else}
-          {#if !pinnedVisibleNotes.length}
+          {#if !pinnedVisibleNotes.length && !searching && !loading}
             <div class="workbench-empty">
               <span>{#if view === 'trash'}<Trash2 />{:else}<FileText />{/if}</span>
-              <strong>{query ? '没有找到相关内容' : view === 'trash' ? '回收站是空的' : '这里还没有便签'}</strong>
-              <p>{view === 'trash' ? '删除的便签会先保存在这里' : '记录一件现在不想忘记的事'}</p>
-              {#if view !== 'trash'}<button on:click={() => void createNote()}><Plus />新建便签</button>{/if}
+              <strong>{searchError ? '搜索未完成' : query ? '没有找到相关内容' : view === 'trash' ? '回收站是空的' : '这里还没有便签'}</strong>
+              <p>{searchError || (query ? '换个关键词，或清除筛选再试试' : view === 'trash' ? '删除的便签会先保存在这里' : '记录一件现在不想忘记的事')}</p>
+              {#if searchError}<button on:click={() => scheduleSearch(query)}>重试搜索</button>{/if}
+              {#if view !== 'trash' && !query}<button on:click={() => void createNote()}><Plus />新建便签</button>{/if}
             </div>
           {/if}
         {/each}
@@ -976,7 +1035,7 @@
         <button on:click={() => { const id = contextMenu!.note.id; closeContextMenu(); void openNote(id, 'card') }}><FileText />卡片</button>
         <button on:click={() => { const id = contextMenu!.note.id; closeContextMenu(); void openNote(id, 'editor') }}><Pencil />完整编辑</button>
         <span></span>
-        <button on:click={() => void togglePin(contextMenu!.note)}>{#if contextMenu.note.pinned}<PinOff />取消置顶{:else}<Pin />置顶便签{/if}</button>
+        <button on:click={() => void togglePin(contextMenu!.note)}>{#if contextMenu.note.pinned}<PinOff />取消列表置顶{:else}<Pin />列表置顶{/if}</button>
         <button on:click={() => void archiveMany([contextMenu!.note.id], !contextMenu!.note.archived)}>{#if contextMenu.note.archived}<ArchiveRestore />移回全部便签{:else}<Archive />归档便签{/if}</button>
         <button on:click={() => { toggleSelection(contextMenu!.note.id); closeContextMenu() }}><Check />选择便签</button>
         <span></span><button class="danger" on:click={() => void trashMany([contextMenu!.note.id])}><Trash2 />移到回收站</button>

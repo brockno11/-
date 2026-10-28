@@ -51,9 +51,42 @@ pub struct SaveNoteInput {
     pub title: String,
     pub content: Value,
     pub plain_text: String,
-    pub pinned: bool,
-    pub archived: bool,
-    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NoteAppearance {
+    pub font_family: Option<String>,
+    pub font_size: Option<u16>,
+    pub line_height: Option<f32>,
+    pub task_marker_size: Option<u8>,
+}
+
+impl NoteAppearance {
+    pub fn validate(&self) -> Result<(), crate::AppError> {
+        if self.font_family.as_ref().is_some_and(|v| v.trim().is_empty() || v.len() > 200)
+            || self.font_size.is_some_and(|v| !(9..=72).contains(&v))
+            || self.line_height.is_some_and(|v| !v.is_finite() || !(1.0..=3.0).contains(&v))
+            || self.task_marker_size.is_some_and(|v| v != 0 && !(12..=36).contains(&v)) {
+            return Err(crate::AppError::Invalid("便签外观数值无效".into()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NoteViewState {
+    pub anchor: u32,
+    pub head: u32,
+    pub scroll_top: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotePreferences {
+    pub appearance: NoteAppearance,
+    pub view: Option<NoteViewState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +99,7 @@ pub struct AppSettings {
     pub default_font_family: String,
     pub default_font_size: u16,
     pub default_line_height: f32,
+    pub default_task_marker_size: u8,
     pub capsule_display: String,
     pub auto_hide_at_screen_edge: bool,
     pub sidebar_collapsed: bool,
@@ -90,6 +124,7 @@ impl Default for AppSettings {
             default_font_family: "Microsoft YaHei UI".into(),
             default_font_size: 16,
             default_line_height: 1.55,
+            default_task_marker_size: 0,
             capsule_display: "comfortable".into(),
             auto_hide_at_screen_edge: true,
             sidebar_collapsed: false,

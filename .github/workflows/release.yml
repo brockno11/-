@@ -12,35 +12,31 @@ permissions:
 jobs:
   publish:
     name: 构建、签名并发布
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: windows-latest
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: 配置 Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
       - name: 配置 Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: 安装前端依赖
         run: npm ci
 
-      - name: 校验版本号和标签
-        run: npm run version:check
-
-      - name: 前端检查与测试
-        run: |
-          npm run check
-          npm test
+      - name: 发布质量门
+        run: npm run quality:release
 
       - name: 构建签名安装包并创建 GitHub Release
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -51,7 +47,9 @@ jobs:
           releaseBody: |
             轻笺 Windows 正式版。完整更新记录请查看仓库中的 CHANGELOG.md。
 
-            推荐下载 `轻笺_*_x64-setup.exe` 安装包；应用内更新由签名文件和 `latest.json` 自动完成。
+            推荐下载 Windows x64 安装包（文件名以 `-setup.exe` 结尾）；应用内更新由签名文件和 `latest.json` 自动完成。
+
+            Source commit: `${{ github.sha }}`
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           uploadUpdaterJson: true

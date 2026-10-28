@@ -1,3 +1,5 @@
+import { PROGRESS_LABELS, taskState } from './progress'
+
 export interface MarkdownNode {
   type?: string
   text?: string
@@ -8,6 +10,7 @@ export interface MarkdownNode {
 
 export interface MarkdownOptions {
   assetUrl?: (assetPath: string, source: string) => string
+  progressEnabled?: boolean
 }
 
 function attribute(node: MarkdownNode, name: string): unknown {
@@ -106,7 +109,8 @@ function serializeList(node: MarkdownNode, options: MarkdownOptions): string {
 
   return (node.content ?? []).map((item, index) => {
     const checked = Boolean(attribute(item, 'checked'))
-    const prefix = task ? `- [${checked ? 'x' : ' '}] ` : ordered ? `${start + index}. ` : '- '
+    const state = task && options.progressEnabled ? `【${PROGRESS_LABELS[taskState(item)]}】` : ''
+    const prefix = task ? `- [${checked ? 'x' : ' '}] ${state}` : ordered ? `${start + index}. ` : '- '
     const children = item.content ?? []
     const first = children[0]
     const firstLine = first?.type === 'paragraph'
@@ -181,6 +185,7 @@ function serializeBlock(node: MarkdownNode, options: MarkdownOptions): string {
 }
 
 export function serializeMarkdown(document: MarkdownNode, options: MarkdownOptions = {}): string {
+  options = { ...options, progressEnabled: document.attrs?.progressEnabled === true }
   const blocks = (document.content ?? []).map((node) => serializeBlock(node, options))
   return `${blocks.filter(Boolean).join('\n\n').trimEnd()}\n`
 }

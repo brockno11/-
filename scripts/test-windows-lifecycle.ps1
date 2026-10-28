@@ -11,6 +11,15 @@ if (-not $resolvedExecutable.StartsWith($workspace, [System.StringComparison]::O
     throw "The test executable must be inside the current workspace"
 }
 
+$packagePath = Join-Path $workspace "package.json"
+$expectedVersion = [string](Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json).version
+$versionInfo = (Get-Item -LiteralPath $resolvedExecutable).VersionInfo
+$actualFileVersion = [string]$versionInfo.FileVersion
+$actualProductVersion = [string]$versionInfo.ProductVersion
+if ($actualFileVersion -ne $expectedVersion -or $actualProductVersion -ne $expectedVersion) {
+    throw "QA executable version mismatch: expected $expectedVersion, file=$actualFileVersion, product=$actualProductVersion"
+}
+
 $binaryText = [System.Text.Encoding]::ASCII.GetString(
     [System.IO.File]::ReadAllBytes($resolvedExecutable)
 )

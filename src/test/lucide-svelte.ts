@@ -1,4 +1,8 @@
+export { default as ArrowLeft } from './IconStub.svelte'
 export { default as Check } from './IconStub.svelte'
+export { default as ChevronRight } from './IconStub.svelte'
 export { default as Folder } from './IconStub.svelte'
 export { default as MoreHorizontal } from './IconStub.svelte'
 export { default as Pin } from './IconStub.svelte'
+export { default as Star } from './IconStub.svelte'
+export { default as X } from './IconStub.svelte'

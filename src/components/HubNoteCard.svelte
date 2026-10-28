@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Check, Folder, MoreHorizontal, Pin } from 'lucide-svelte'
+  import { Check, Folder, MoreHorizontal, Star } from 'lucide-svelte'
   import type { Folder as NoteFolder, NoteSummary } from '../lib/types'
   import { tooltip } from '../lib/tooltip'
 
@@ -14,7 +14,6 @@
   export let dropBefore = false
   export let formattedDate = ''
   export let onActivate: (note: NoteSummary) => void
-  export let onToggleSelection: (note: NoteSummary) => void
   export let onTogglePin: (note: NoteSummary) => void
   export let onOpenMenu: (event: MouseEvent, note: NoteSummary) => void
   export let onContextMenu: (event: MouseEvent, note: NoteSummary) => void
@@ -61,12 +60,7 @@
   class:selection-mode={selectionMode}
   class:drag-enabled={dragEnabled}
   data-note-id={note.id}
-  role="button"
-  tabindex="0"
-  aria-pressed={selected}
   draggable={dragEnabled}
-  on:click={() => onActivate(note)}
-  on:keydown={handleKeydown}
   on:contextmenu={(event) => onContextMenu(event, note)}
   on:dragstart={(event) => onDragStart(event, note)}
   on:dragover={(event) => onDragOver(event, note)}
@@ -77,13 +71,23 @@
     <button
       class="note-check"
       class:checked={selected}
-      aria-label={selected ? `取消选择 ${note.title}` : `选择 ${note.title}`}
-      on:click|stopPropagation={() => onToggleSelection(note)}
+      aria-label={selected ? `取消勾选 ${note.title}` : `勾选 ${note.title}`}
+      aria-pressed={selected}
+      on:click={() => onActivate(note)}
     >{#if selected}<Check />{/if}</button>
   {/if}
 
-  <div class="workbench-card-copy">
-    <div class="workbench-card-title">
+  <button
+    class="workbench-card-main"
+    aria-label={selectionMode
+      ? selected ? `取消选择 ${note.title}` : `选择 ${note.title}`
+      : `打开 ${note.title}`}
+    aria-pressed={selectionMode ? selected : undefined}
+    on:click={() => onActivate(note)}
+    on:keydown={handleKeydown}
+  >
+  <span class="workbench-card-copy">
+    <span class="workbench-card-title">
       <strong>
         {#each highlighted(note.title || '新便签') as part}
           {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
@@ -92,36 +96,37 @@
       {#if desktopVisible}
         <span class="desktop-status" aria-label="已显示在桌面" use:tooltip={'已显示在桌面'}></span>
       {/if}
-      {#if note.pinned && !note.trashedAt}<Pin class="pinned-mark" aria-label="已置顶" />{/if}
+      {#if note.pinned && !note.trashedAt}<Star class="pinned-mark" aria-label="已置顶" />{/if}
       <time>{formattedDate}</time>
-    </div>
+    </span>
 
-    <p>
+    <span class="workbench-card-preview">
       {#each highlighted(note.preview || '空白便签') as part}
         {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
       {/each}
-    </p>
+    </span>
 
     {#if folderName || note.tags.length || note.trashedAt}
-      <div class="workbench-card-meta">
+      <span class="workbench-card-meta">
         {#if folderName}<span class="meta-folder"><Folder />{folderName}</span>{/if}
         {#each note.tags.slice(0, 2) as tag}
           <span class="meta-tag"><i style={`--tag-color:${tag.color}`}></i>{tag.name}</span>
         {/each}
         {#if note.tags.length > 2}<span>+{note.tags.length - 2}</span>{/if}
         {#if note.trashedAt}<span>回收站</span>{/if}
-      </div>
+      </span>
     {/if}
-  </div>
+  </span>
+  </button>
 
   {#if !note.trashedAt && !selectionMode}
     <div class="workbench-card-actions">
       <button
         class:active={note.pinned}
-        aria-label={note.pinned ? '取消置顶' : '置顶便签'}
-        use:tooltip={note.pinned ? '取消置顶' : '置顶便签'}
+        aria-label={note.pinned ? '取消列表置顶' : '列表置顶'}
+        use:tooltip={note.pinned ? '取消列表置顶' : '列表置顶'}
         on:click|stopPropagation={() => onTogglePin(note)}
-      ><Pin /></button>
+      ><Star /></button>
       <button
         aria-label="更多操作"
         use:tooltip={'更多操作'}

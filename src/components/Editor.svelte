@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
-  import { Editor } from '@tiptap/core'
+  import { Editor, getTextBetween, getTextSerializersFromSchema } from '@tiptap/core'
   import { NodeSelection } from '@tiptap/pm/state'
   import {
     AlignCenter, AlignLeft, AlignRight, RotateCcw, WrapText,
@@ -10,7 +10,9 @@
   import FontFamily from '@tiptap/extension-font-family'
   import TextAlign from '@tiptap/extension-text-align'
   import TaskList from '@tiptap/extension-task-list'
-  import TaskItem from '@tiptap/extension-task-item'
+  import { SizedTaskItem } from '../lib/task-item'
+  import { ProgressDocument } from '../lib/progress-extension'
+  import { progressPlainText } from '../lib/progress'
   import Placeholder from '@tiptap/extension-placeholder'
   import { TableKit } from '@tiptap/extension-table'
   import DOMPurify from 'dompurify'
@@ -27,6 +29,8 @@
   export let defaultFontFamily = 'Microsoft YaHei UI'
   export let defaultFontSize = 16
   export let defaultLineHeight = 1.55
+  export let taskMarkerSize = 0
+  export let onBusyChange: (busy: boolean) => void = () => undefined
   export let onChange: (content: Record<string, unknown>, plainText: string) => void
   export let onReady: (editor: Editor) => void
   export let onSelectionChange: () => void
@@ -36,6 +40,7 @@
   let host: HTMLDivElement
   let editor: Editor | undefined
   let loadedNoteId = ''
+  let appliedEditorCss = ''
   let editorScroll: HTMLElement | null = null
   let positionFrame = 0
   let imageSelected = false
@@ -44,6 +49,11 @@
   let imageToolbarBelow = false
   let imageWidth = 0
   let imageLayout: ImageLayout = 'block-center'
+  let imageOperations = 0
+  let composing = false
+
+  function reportBusy() { onBusyChange(composing || imageOperations > 0) }
+  $: editorCss = `font-family:${defaultFontFamily};font-size:${defaultFontSize}px;line-height:${defaultLineHeight};--task-marker-setting:${taskMarkerSize}`
 
   const sanitizeOptions = {
     ALLOWED_TAGS: [
@@ -54,6 +64,7 @@
     ALLOWED_ATTR: [
       'href', 'title', 'target', 'colspan', 'rowspan', 'style', 'src', 'alt',
       'width', 'height', 'data-asset-path', 'data-attachment-id', 'data-layout',
+      'data-type', 'data-checked', 'data-progress-state', 'data-qingjian-progress-label',
     ],
     ALLOW_DATA_ATTR: false,
   }
@@ -61,6 +72,7 @@
   function sanitizeClipboardHtml(html: string): string {
     const clean = DOMPurify.sanitize(html, sanitizeOptions)
     const document = new DOMParser().parseFromString(clean, 'text/html')
+    document.querySelectorAll('span[data-qingjian-progress-label]').forEach(label => label.remove())
     const allowedStyles = new Set([
       'font-family', 'font-size', 'font-style', 'font-weight',
       'text-align', 'text-decoration', 'color', 'background-color',
@@ -157,6 +169,8 @@
         return
       }
       const rect = container.getBoundingClientRect()
+      const visible = editorScroll?.getBoundingClientRect()
+      if (visible && (rect.bottom < visible.top || rect.top > visible.bottom)) return
       imageToolbarBelow = rect.top < 146
       imageToolbarLeft = Math.max(138, Math.min(
         window.innerWidth - 138,
@@ -178,7 +192,8 @@
   }
 
   async function insertImageBlob(blob: Blob, selectAfterInsert = true) {
-    if (!editor) return
+    if (!editor?.isEditable) { onError('正在保存便签，请稍后插入图片'); return }
+    imageOperations++; reportBusy()
     try {
       const dataUrl = await fileToDataUrl(blob)
       const attachment = await backend.saveAttachment(dataUrl, blob.type || 'image/png')
@@ -197,6 +212,8 @@
       if (selectAfterInsert) selectImageBeforeCursor()
     } catch (error) {
       onError(error instanceof Error ? error.message : '图片插入失败')
+    } finally {
+      imageOperations--; reportBusy()
     }
   }
 
@@ -212,6 +229,9 @@
   }
 
   onMount(() => {
+    loadedNoteId = noteId
+    appliedEditorCss = editorCss
+    if (import.meta.env.MODE === 'qa') performance.mark('qingjian:editor-construct-start')
     editor = new Editor({
       element: host,
       content,
@@ -228,7 +248,11 @@
         FontSize,
         TextAlign.configure({ types: ['heading', 'paragraph'] }),
         TaskList,
-        TaskItem.configure({ nested: true }),
+        ProgressDocument,
+        SizedTaskItem.configure({
+          nested: true,
+          a11y: { checkboxLabel: node => `${node.attrs.checked ? '取消完成' : '完成'}：${node.textContent || '待办事项'}` },
+        }),
         MarkdownTaskShortcut,
         TableKit.configure({
           table: {
@@ -243,16 +267,29 @@
         }),
         MixedContentSelection,
         Placeholder.configure({
-          placeholder: '开始记录… 输入 #、-、[ ] 或 ``` 后按空格快速排版',
+          placeholder: '随手记下… 输入 [ ] 后按空格添加待办',
         }),
       ],
       editorProps: {
+        clipboardTextSerializer: (slice, view) => {
+          if (view.state.doc.attrs.progressEnabled === true) {
+            return progressPlainText({ type: 'doc', attrs: { progressEnabled: true }, content: slice.content.toJSON() })
+          }
+          // Preserve Tiptap's range-aware serializers (including table selections).
+          const { doc, selection, schema } = view.state
+          return [...selection.ranges].sort((a, b) => a.$from.pos - b.$from.pos)
+            .map(({ $from, $to }) => getTextBetween(doc, { from: $from.pos, to: $to.pos }, {
+              textSerializers: getTextSerializersFromSchema(schema),
+            })).join('\n\n')
+        },
         attributes: {
           class: 'note-prosemirror',
           spellcheck: 'true',
-          style: `font-family:${defaultFontFamily};font-size:${defaultFontSize}px;line-height:${defaultLineHeight}`,
+          style: editorCss,
         },
         handleDOMEvents: {
+          compositionstart: () => { composing = true; reportBusy(); return false },
+          compositionend: () => { composing = false; reportBusy(); return false },
           contextmenu: (view, event) => {
             if (view.state.selection.empty || view.state.selection instanceof NodeSelection) return false
             event.preventDefault()
@@ -315,6 +352,7 @@
         },
       },
       onCreate: ({ editor: instance }) => {
+        if (import.meta.env.MODE === 'qa') performance.mark('qingjian:editor-ready')
         loadedNoteId = noteId
         onReady(instance)
         updateImageTools(instance)
@@ -331,7 +369,8 @@
         onSelectionChange()
       },
     })
-    editorScroll = host.closest('.editor-scroll')
+    if (import.meta.env.MODE === 'qa') performance.mark('qingjian:editor-construct-end')
+    editorScroll = host.closest('.note-window-editor, .editor-scroll')
     editorScroll?.addEventListener('scroll', positionImageToolbar, { passive: true })
     window.addEventListener('resize', positionImageToolbar)
   })
@@ -342,7 +381,8 @@
     queueMicrotask(() => editor?.commands.focus('end'))
   }
 
-  $: if (editor) {
+  $: if (editor && editorCss && editorCss !== appliedEditorCss) {
+    appliedEditorCss = editorCss
     editor.setOptions({
       editorProps: {
         ...editor.options.editorProps,
@@ -350,10 +390,11 @@
           ...editor.options.editorProps.attributes,
           class: 'note-prosemirror',
           spellcheck: 'true',
-          style: `font-family:${defaultFontFamily};font-size:${defaultFontSize}px;line-height:${defaultLineHeight}`,
+          style: editorCss,
         },
       },
     })
+    editor.view.dom.dispatchEvent(new Event('qingjian:task-style'))
   }
 
   onDestroy(() => {

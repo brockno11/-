@@ -1,6 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use chrono::Utc;
 use std::{
+    collections::BTreeSet,
     fs,
     path::PathBuf,
     sync::Mutex,
@@ -12,9 +13,60 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub data_dir: PathBuf,
     pub assets_dir: PathBuf,
+    lifecycle: Mutex<LifecycleGate>,
+}
+
+#[derive(Default)]
+struct LifecycleGate {
+    operation: Option<String>,
+    changing_windows: usize,
+    releasing: BTreeSet<String>,
+}
+
+pub struct WindowChange<'a>(&'a Mutex<LifecycleGate>);
+impl Drop for WindowChange<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut gate) = self.0.lock() { gate.changing_windows -= 1; }
+    }
 }
 
 impl AppState {
+    pub fn begin_operation(&self, id: String) -> Result<(), AppError> {
+        let mut gate = self.lifecycle.lock().map_err(|_| AppError::Other("窗口会话不可用".into()))?;
+        if gate.operation.is_some() || gate.changing_windows > 0 || !gate.releasing.is_empty() {
+            return Err(AppError::Other("便签窗口正在打开或保存，请稍后重试".into()));
+        }
+        gate.operation = Some(id);
+        Ok(())
+    }
+
+    pub fn end_operation(&self, id: &str) -> Result<(), AppError> {
+        let mut gate = self.lifecycle.lock().map_err(|_| AppError::Other("窗口会话不可用".into()))?;
+        if gate.operation.as_deref() == Some(id) { gate.operation = None; }
+        Ok(())
+    }
+
+    // A counter guards creation/destruction without holding a mutex while a
+    // WebView dispatches to the UI thread. Lifecycle operations fail safely
+    // rather than blocking that thread or missing a newly created session.
+    pub fn changing_windows(&self) -> Result<WindowChange<'_>, AppError> {
+        let mut gate = self.lifecycle.lock().map_err(|_| AppError::Other("窗口会话不可用".into()))?;
+        if gate.operation.is_some() { return Err(AppError::Other("正在安全保存便签，请稍后打开窗口".into())); }
+        if !gate.releasing.is_empty() { return Err(AppError::Other("便签窗口正在回收，请稍后重试".into())); }
+        gate.changing_windows += 1;
+        Ok(WindowChange(&self.lifecycle))
+    }
+
+    pub fn begin_releasing(&self, note_id: &str) -> Result<bool, AppError> {
+        let mut gate = self.lifecycle.lock().map_err(|_| AppError::Other("窗口会话不可用".into()))?;
+        if gate.operation.is_some() || gate.changing_windows > 0 { return Ok(false); }
+        Ok(gate.releasing.insert(note_id.to_owned()))
+    }
+
+    pub fn finish_releasing(&self, note_id: &str) {
+        if let Ok(mut gate) = self.lifecycle.lock() { gate.releasing.remove(note_id); }
+    }
+
     pub fn initialize(data_dir: PathBuf) -> Result<Self, AppError> {
         let assets_dir = data_dir.join("assets");
         let backups_dir = data_dir.join("backups");
@@ -23,12 +75,14 @@ impl AppState {
         let db_path = data_dir.join("qingjian.db");
         let connection = Connection::open(&db_path)?;
         let previous_version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if db_path.exists() && previous_version > 0 && previous_version < 5 {
-            connection.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+        if previous_version > 6 {
+            return Err(AppError::Invalid("数据库由更新版本的轻笺创建，请使用相同或更新版本打开".into()));
+        }
+        if db_path.exists() && previous_version > 0 && previous_version < 6 {
             let backup = backups_dir.join(format!(
                 "迁移前-{}-v{}.db", Utc::now().format("%Y%m%d-%H%M%S"), previous_version,
             ));
-            fs::copy(&db_path, backup)?;
+            connection.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
         }
         migrate(&connection)?;
         let health: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
@@ -40,6 +94,7 @@ impl AppState {
             db: Mutex::new(connection),
             data_dir,
             assets_dir,
+            lifecycle: Mutex::new(LifecycleGate::default()),
         })
     }
 }
@@ -48,8 +103,7 @@ fn create_daily_snapshot(db: &Connection, db_path: &std::path::Path, backups_dir
     if !db_path.exists() { return Ok(()) }
     let snapshot = backups_dir.join(format!("auto-{}.db", Utc::now().format("%Y%m%d")));
     if !snapshot.exists() {
-        db.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
-        fs::copy(db_path, &snapshot)?;
+        db.execute("VACUUM INTO ?1", [snapshot.to_string_lossy().as_ref()])?;
     }
     let mut snapshots = fs::read_dir(backups_dir)?
         .filter_map(Result::ok)
@@ -325,12 +379,44 @@ pub(crate) fn migrate(db: &Connection) -> Result<(), AppError> {
         migrate_legacy_note_titles(db)?;
         db.execute_batch("PRAGMA user_version = 5;")?;
     }
+    if version < 6 {
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS note_preferences (
+                note_id TEXT PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+                appearance_json TEXT NOT NULL DEFAULT '{}',
+                view_json TEXT
+             );
+             PRAGMA user_version = 6;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_gate_excludes_new_windows_and_stale_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path().join("data")).unwrap();
+        let creating = state.changing_windows().unwrap();
+        assert!(state.begin_operation("current".into()).is_err());
+        drop(creating);
+        state.begin_operation("current".into()).unwrap();
+        assert!(state.changing_windows().is_err());
+        state.end_operation("earlier").unwrap();
+        assert!(state.changing_windows().is_err());
+        state.end_operation("current").unwrap();
+        assert!(state.changing_windows().is_ok());
+        assert!(state.begin_releasing("one").unwrap());
+        assert!(state.changing_windows().is_err());
+        assert!(state.begin_operation("next".into()).is_err());
+        state.finish_releasing("one");
+        assert!(state.changing_windows().is_ok());
+    }
 
     #[test]
     fn migrates_v1_database_without_losing_notes() {
@@ -355,7 +441,7 @@ mod tests {
         let title: String = db
             .query_row("SELECT title FROM notes WHERE id='one'", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(title, "旧便签");
         assert!(has_column(&db, "notes", "folder_id").unwrap());
         assert!(has_column(&db, "notes", "sort_order").unwrap());
@@ -371,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_starts_at_schema_five() {
+    fn fresh_database_starts_at_schema_six() {
         let db = Connection::open_in_memory().unwrap();
         migrate(&db).unwrap();
         let version: u32 = db.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
@@ -385,7 +471,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(tables, 5);
         assert!(has_column(&db, "note_window_state", "text_opacity").unwrap());
     }

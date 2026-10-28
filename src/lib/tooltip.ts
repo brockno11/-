@@ -42,6 +42,12 @@ function hideTooltip() {
   tooltipElement?.classList.remove('visible')
 }
 
+export function dismissTooltip(): boolean {
+  const visible = Boolean(activeTarget)
+  hideTooltip()
+  return visible
+}
+
 function showTooltip(target: HTMLElement, content: string) {
   if (!content.trim()) return
   if (activeTarget && activeTarget !== target) {
@@ -69,12 +75,18 @@ export function tooltip(node: HTMLElement, initialContent: string) {
   const hideIfActive = () => {
     if (activeTarget === node || showTimer) hideTooltip()
   }
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key === 'Escape' && activeTarget === node) {
+      hideTooltip(); event.preventDefault(); event.stopPropagation()
+    }
+  }
 
   node.addEventListener('mouseenter', schedule)
   node.addEventListener('mouseleave', hideIfActive)
   node.addEventListener('focus', showForKeyboard)
   node.addEventListener('blur', hideIfActive)
   node.addEventListener('click', hideIfActive)
+  node.addEventListener('keydown', onKey)
   window.addEventListener('scroll', hideIfActive, true)
   window.addEventListener('resize', hideIfActive)
 
@@ -89,6 +101,7 @@ export function tooltip(node: HTMLElement, initialContent: string) {
       node.removeEventListener('focus', showForKeyboard)
       node.removeEventListener('blur', hideIfActive)
       node.removeEventListener('click', hideIfActive)
+      node.removeEventListener('keydown', onKey)
       window.removeEventListener('scroll', hideIfActive, true)
       window.removeEventListener('resize', hideIfActive)
       hideIfActive()

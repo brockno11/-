@@ -1,12 +1,14 @@
 {
   "name": "qingjian",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "quality:static": "npm run check && npm test && npm run build",
+    "quality:release": "npm run version:check && npm run quality:static && cargo test --manifest-path src-tauri/Cargo.toml",
     "version:check": "node scripts/check-version.mjs",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -1,0 +1,6 @@
+interface:
+  display_name: "轻笺更新守门人"
+  short_description: "分级审查轻笺改动、UI体验与Windows发布风险"
+  default_prompt: "Use $qingjian-update-guardian in quick mode to review the current changes without modifying source files."
+policy:
+  allow_implicit_invocation: true

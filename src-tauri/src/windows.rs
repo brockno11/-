@@ -292,7 +292,10 @@ fn save_geometry(window: &WebviewWindow, state: &AppState, note_id: &str, mode: 
 
 fn build_note_window(app: &AppHandle, state: &AppState, note_state: &NoteWindowState) -> Result<WebviewWindow, AppError> {
     let label = note_label(&note_state.note_id);
-    if let Some(window) = app.get_webview_window(&label) { return Ok(window); }
+    if let Some(window) = app.get_webview_window(&label) {
+        if window.hwnd().is_ok() { return Ok(window); }
+        return Err(AppError::Other("便签窗口正在回收，请稍后重试".into()));
+    }
     let (width, height, min_w, min_h, max) = mode_spec(&note_state.mode)?;
     let url = format!("index.html?noteId={}&window={label}", note_state.note_id);
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
@@ -307,7 +310,19 @@ fn build_note_window(app: &AppHandle, state: &AppState, note_state: &NoteWindowS
     install_window_appearance(&window);
     restore_geometry(&window, state, note_state)?;
     let watched = window.clone();
+    let watched_note_id = note_state.note_id.clone();
     window.on_window_event(move |event| {
+        if let WindowEvent::Focused(true) = event {
+            if let Some(state) = watched.app_handle().try_state::<AppState>() {
+                if let Ok(db) = state.db.lock() {
+                    let _ = db.execute("UPDATE note_window_state SET updated_at=?2 WHERE note_id=?1",
+                        params![watched_note_id, Utc::now().to_rfc3339()]);
+                }
+            }
+        }
+        if let WindowEvent::Destroyed = event {
+            if let Some(state) = watched.app_handle().try_state::<AppState>() { state.finish_releasing(&watched_note_id); }
+        }
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             let _ = watched.emit("qingjian://hide-requested", ());
@@ -327,6 +342,54 @@ fn mark_visible(state: &AppState, note_id: &str, visible: bool) -> Result<(), Ap
     db.execute("UPDATE note_window_state SET visible=?2,updated_at=?3 WHERE note_id=?1",
         params![note_id, visible as i32, Utc::now().to_rfc3339()])?;
     Ok(())
+}
+
+fn cascade_position(anchor: (f64, f64), work: (f64, f64, f64, f64), size: (f64, f64), scale: f64) -> (i32, i32) {
+    let offset = 24.0 * scale;
+    let max_x = work.0 + (work.2 - size.0).max(0.0);
+    let max_y = work.1 + (work.3 - size.1).max(0.0);
+    let candidate = (anchor.0 + offset, anchor.1 + offset);
+    let x = if candidate.0 > max_x { work.0 + offset } else { candidate.0 };
+    let y = if candidate.1 > max_y { work.1 + offset } else { candidate.1 };
+    (x.clamp(work.0, max_x).round() as i32, y.clamp(work.1, max_y).round() as i32)
+}
+
+/** Only a first opening is cascaded. Saved geometry always remains authoritative. */
+fn place_new_note(app: &AppHandle, state: &AppState, window: &WebviewWindow, note_state: &NoteWindowState, source: Option<&str>) -> Result<(), AppError> {
+    let candidates = {
+        let db = state.db.lock().map_err(|_| AppError::Other("数据库连接不可用".into()))?;
+        let has_history: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM note_window_geometry WHERE note_id=?1)", [&note_state.note_id], |row| row.get(0))?;
+        if has_history { return Ok(()); }
+        let mut statement = db.prepare("SELECT note_id FROM note_window_state WHERE visible=1 AND note_id<>?1 ORDER BY updated_at DESC,note_id")?;
+        let ids = statement.query_map([&note_state.note_id], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    let occupied: Vec<(i32, i32)> = candidates.iter()
+        .filter_map(|id| app.get_webview_window(&note_label(id)))
+        .filter_map(|candidate| candidate.outer_position().ok().map(|p| (p.x, p.y))).collect();
+    let source_ids = source.into_iter().map(str::to_owned).chain(candidates);
+    let anchor = source_ids.filter(|id| id != &note_state.note_id)
+        .filter_map(|id| app.get_webview_window(&note_label(&id)))
+        .find(|candidate| candidate.is_visible().unwrap_or(false));
+    if let Some(anchor) = anchor {
+        if let (Ok(position), Ok(Some(monitor))) = (anchor.outer_position(), anchor.current_monitor()) {
+            let work = monitor.work_area();
+            let scale = monitor.scale_factor();
+            let (width, height, _, _, _) = mode_spec(&note_state.mode)?;
+            let bounds = (work.position.x as f64, work.position.y as f64, work.size.width as f64, work.size.height as f64);
+            let mut next = (position.x as f64, position.y as f64);
+            let mut destination = cascade_position(next, bounds, (width * scale, height * scale), scale);
+            for _ in 0..occupied.len() {
+                if !occupied.iter().any(|p| (p.0 - destination.0).abs() <= 2 && (p.1 - destination.1).abs() <= 2) { break; }
+                next = (destination.0 as f64, destination.1 as f64);
+                destination = cascade_position(next, bounds, (width * scale, height * scale), scale);
+            }
+            let (x, y) = destination;
+            window.set_position(PhysicalPosition::new(x, y)).map_err(|error| AppError::Other(error.to_string()))?;
+            window.set_size(LogicalSize::new(width, height)).map_err(|error| AppError::Other(error.to_string()))?;
+        }
+    }
+    save_geometry(window, state, &note_state.note_id, &note_state.mode)
 }
 
 #[tauri::command]
@@ -351,11 +414,14 @@ pub async fn open_note_window(
     state: State<'_, AppState>,
     note_id: String,
     preferred_mode: Option<String>,
+    source_note_id: Option<String>,
 ) -> Result<NoteWindowState, AppError> {
+    let _changing = state.changing_windows()?;
     let note_state = ensure_window_state(&state, &note_id, preferred_mode.as_deref())?;
     let already_open = app.get_webview_window(&note_label(&note_id)).is_some();
     let window = build_note_window(&app, &state, &note_state)?;
     if preferred_mode.is_some() { restore_geometry(&window, &state, &note_state)?; }
+    if !already_open { place_new_note(&app, &state, &window, &note_state, source_note_id.as_deref())?; }
     set_lock_runtime(&window, note_state.locked)?;
     if already_open {
         let _ = window.emit("qingjian://window-state-changed", note_state.clone());
@@ -398,6 +464,43 @@ pub fn list_visible_note_windows(state: State<'_, AppState>) -> Result<Vec<NoteW
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Runtime windows, rather than persisted visibility, define save participants.
+#[tauri::command]
+pub fn list_live_note_ids(app: AppHandle) -> Vec<String> {
+    app.webview_windows().keys().filter_map(|label| label.strip_prefix(NOTE_PREFIX))
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok()).map(str::to_owned).collect()
+}
+
+#[tauri::command]
+pub fn begin_note_operation(state: State<'_, AppState>, operation_id: String) -> Result<(), AppError> {
+    uuid::Uuid::parse_str(&operation_id).map_err(|_| AppError::Invalid("保存操作编号无效".into()))?;
+    state.begin_operation(operation_id)
+}
+
+#[tauri::command]
+pub fn end_note_operation(state: State<'_, AppState>, operation_id: String) -> Result<(), AppError> {
+    state.end_operation(&operation_id)
+}
+
+/// The caller has saved its content and view state. Never destroy a window
+/// that was shown again while those asynchronous saves were in flight.
+#[tauri::command]
+pub fn release_idle_note_window(app: AppHandle, state: State<'_, AppState>, note_id: String) -> Result<bool, AppError> {
+    validate_note_id(&note_id)?;
+    if !state.begin_releasing(&note_id)? { return Ok(false); }
+    let result = (|| {
+        let Some(window) = app.get_webview_window(&note_label(&note_id)) else { return Ok(false); };
+        let note_state = read_window_state(&state, &note_id)?.ok_or_else(|| AppError::Invalid("便签状态不存在".into()))?;
+        if note_state.visible || window.is_visible().map_err(|e| AppError::Other(e.to_string()))? { return Ok(false); }
+        window.destroy().map_err(|e| AppError::Other(e.to_string()))?;
+        Ok(true)
+    })();
+    // destroy() queues native work. Keep the gate until the Destroyed event,
+    // so a rapid reopen cannot reuse the window that is about to disappear.
+    if !matches!(result, Ok(true)) { state.finish_releasing(&note_id); }
+    result
+}
+
 #[tauri::command]
 pub fn save_note_window_geometry(app: AppHandle, state: State<'_, AppState>, note_id: String) -> Result<(), AppError> {
     let note_state = read_window_state(&state, &note_id)?.ok_or_else(|| AppError::Invalid("便签窗口状态不存在".into()))?;
@@ -427,9 +530,9 @@ pub fn set_note_window_mode(
         .or_else(|| window.current_monitor().ok().flatten());
     if let Some(monitor) = monitor {
         let work = monitor.work_area();
-        let x = (center.0 - size.width as f64 / 2.0)
+        let x = (old_position.x as f64)
             .max(work.position.x as f64).min((work.position.x + work.size.width as i32 - size.width as i32) as f64);
-        let y = (center.1 - size.height as f64 / 2.0)
+        let y = (old_position.y as f64)
             .max(work.position.y as f64).min((work.position.y + work.size.height as i32 - size.height as i32) as f64);
         window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32))
             .map_err(|error| AppError::Other(error.to_string()))?;
@@ -482,6 +585,9 @@ pub fn set_note_window_locked(
 #[tauri::command]
 pub fn hide_note_window(app: AppHandle, state: State<'_, AppState>, note_id: String) -> Result<(), AppError> {
     if let Some(window) = app.get_webview_window(&note_label(&note_id)) {
+        if let Some(note_state) = read_window_state(&state, &note_id)? {
+            save_geometry(&window, &state, &note_id, &note_state.mode)?;
+        }
         window.hide().map_err(|error| AppError::Other(error.to_string()))?;
     }
     mark_visible(&state, &note_id, false)?;
@@ -573,6 +679,10 @@ pub fn expand_docked_note_window(app: AppHandle, state: State<'_, AppState>, not
 
 pub fn show_all(app: &AppHandle) {
     let state = app.state::<AppState>();
+    let Ok(_changing) = state.changing_windows() else {
+        let _ = app.emit("qingjian://operation-blocked", "正在安全保存便签，请稍后显示窗口");
+        return;
+    };
     let ids = list_window_ids(&state, false, true).unwrap_or_default();
     for id in ids {
         if let Ok(note_state) = ensure_window_state(&state, &id, None) {
@@ -587,22 +697,19 @@ pub fn show_all(app: &AppHandle) {
 }
 
 pub fn hide_all(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    if let Ok(ids) = list_window_ids(&state, false, false) {
-        for id in ids {
-            if let Some(window) = app.get_webview_window(&note_label(&id)) { let _ = window.hide(); }
-            let _ = mark_visible(&state, &id, false);
+    // Each live session saves before hiding. A failed save remains visible with
+    // its retry control; no content or visibility is discarded here.
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(NOTE_PREFIX) {
+            let _ = window.emit("qingjian://hide-requested", ());
         }
     }
-    let _ = app.emit("qingjian://note-windows-changed", ());
 }
 
 #[tauri::command]
 pub fn toggle_all_note_windows(app: AppHandle) -> bool {
-    let state = app.state::<AppState>();
-    let has_visible_notes = list_window_ids(&state, false, false)
-        .map(|ids| !ids.is_empty())
-        .unwrap_or(false);
+    let has_visible_notes = app.webview_windows().iter()
+        .any(|(label, window)| label.starts_with(NOTE_PREFIX) && window.is_visible().unwrap_or(false));
     if has_visible_notes {
         hide_all(&app);
         false
@@ -728,6 +835,14 @@ mod tests {
         assert_eq!(note_label(id), "note-550e8400-e29b-41d4-a716-446655440000");
         assert!(validate_note_id(id).is_ok());
         assert!(validate_note_id("../editor").is_err());
+    }
+
+    #[test]
+    fn new_note_cascade_wraps_and_clamps_on_scaled_negative_monitors() {
+        assert_eq!(cascade_position((100.0, 100.0), (0.0, 0.0, 1920.0, 1080.0), (360.0, 280.0), 1.0), (124, 124));
+        assert_eq!(cascade_position((1550.0, 790.0), (0.0, 0.0, 1920.0, 1080.0), (360.0, 280.0), 1.0), (24, 24));
+        assert_eq!(cascade_position((-1800.0, 60.0), (-1920.0, 0.0, 1920.0, 1080.0), (720.0, 560.0), 2.0), (-1752, 108));
+        assert_eq!(cascade_position((10.0, 10.0), (0.0, 0.0, 200.0, 100.0), (360.0, 280.0), 1.0), (0, 0));
     }
 
     #[test]

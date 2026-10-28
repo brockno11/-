@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -12,8 +12,8 @@ use image::{codecs::jpeg::JpegEncoder, DynamicImage, GenericImageView, ImageForm
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
-use tauri::{Manager, State};
-use tempfile::tempdir;
+use tauri::{Emitter, Manager, State};
+use tempfile::{tempdir, NamedTempFile};
 use uuid::Uuid;
 use walkdir::WalkDir;
 use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
@@ -21,7 +21,7 @@ use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 use crate::{
     model::{
         AppSettings, AttachmentResult, BackupManifest, Folder, Note, NoteSummary, SaveNoteInput,
-        Tag, WorkspaceState,
+        Tag, WorkspaceState, NoteAppearance, NotePreferences, NoteViewState,
     },
     AppError, AppState,
 };
@@ -94,12 +94,19 @@ pub fn list_notes(
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    base.into_iter()
-        .map(|mut note| {
-            note.tags = tags_for(&db, &note.id)?;
-            Ok(note)
-        })
-        .collect()
+    // One tag query for the result set instead of a separate query per note.
+    let mut tags_by_note: BTreeMap<String, Vec<Tag>> = BTreeMap::new();
+    let mut statement = db.prepare("SELECT nt.note_id,t.id,t.name,t.color FROM note_tags nt
+        JOIN tags t ON t.id=nt.tag_id ORDER BY t.name COLLATE NOCASE")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, Tag {
+        id: row.get(1)?, name: row.get(2)?, color: row.get(3)?,
+    })))? {
+        let (id, tag) = row?;
+        tags_by_note.entry(id).or_default().push(tag);
+    }
+    Ok(base.into_iter().map(|mut note| {
+        note.tags = tags_by_note.remove(&note.id).unwrap_or_default(); note
+    }).collect())
 }
 
 #[tauri::command]
@@ -202,61 +209,78 @@ fn tag_color(index: usize) -> &'static str {
     COLORS[index % COLORS.len()]
 }
 
+fn save_note_content(db: &Connection, input: &SaveNoteInput) -> Result<(), AppError> {
+    let derived_title: String = input.plain_text.lines().map(str::trim)
+        .find(|line| !line.is_empty()).map(|line| line.chars().take(80).collect())
+        .unwrap_or_else(|| "新便签".into());
+    let changed = db.execute(
+        "UPDATE notes SET title=?2,content_json=?3,plain_text=?4,updated_at=?5
+         WHERE id=?1 AND trashed_at IS NULL AND archived=0",
+        params![input.id, derived_title, input.content.to_string(), input.plain_text, Utc::now().to_rfc3339()],
+    )?;
+    if changed == 0 { return Err(AppError::Invalid("便签不存在或已收起，未覆盖其内容".into())); }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_note(state: State<'_, AppState>, input: SaveNoteInput) -> Result<Note, AppError> {
+    {
+        let db = lock_db(&state)?;
+        save_note_content(&db, &input)?;
+    }
+    get_note(state, input.id)
+}
+
+#[tauri::command]
+pub fn set_note_tags(state: State<'_, AppState>, id: String, names: Vec<String>) -> Result<Vec<Tag>, AppError> {
     let mut db = lock_db(&state)?;
     let transaction = db.transaction()?;
-    let timestamp = Utc::now().to_rfc3339();
-    let derived_title: String = input.plain_text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(80).collect())
-        .unwrap_or_else(|| "新便签".into());
-    let changed = transaction.execute(
-        "UPDATE notes SET title=?2, content_json=?3, plain_text=?4,
-         updated_at=?5, pinned=?6, archived=?7 WHERE id=?1",
-        params![
-            input.id,
-            derived_title,
-            input.content.to_string(),
-            input.plain_text,
-            timestamp,
-            input.pinned as i32,
-            input.archived as i32,
-        ],
-    )?;
-    if changed == 0 {
-        return Err(AppError::Invalid("要保存的便签不存在".into()));
-    }
-    transaction.execute("DELETE FROM note_tags WHERE note_id=?1", [&input.id])?;
-    for (index, name) in input
-        .tags
-        .iter()
-        .map(|name| name.trim())
-        .filter(|name| !name.is_empty())
-        .take(12)
-        .enumerate()
-    {
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT id FROM tags WHERE name=?1 COLLATE NOCASE",
-                [name],
-                |row| row.get(0),
-            )
-            .optional()?;
+    let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM notes WHERE id=?1 AND trashed_at IS NULL)", [&id], |row| row.get(0))?;
+    if !exists { return Err(AppError::Invalid("便签不存在".into())); }
+    transaction.execute("DELETE FROM note_tags WHERE note_id=?1", [&id])?;
+    for (index, name) in names.iter().map(|v| v.trim()).filter(|v| !v.is_empty()).take(12).enumerate() {
+        if name.chars().count() > 80 { return Err(AppError::Invalid("标签最多80个字符".into())); }
+        let existing: Option<String> = transaction.query_row(
+            "SELECT id FROM tags WHERE name=?1 COLLATE NOCASE", [name], |row| row.get(0)).optional()?;
         let tag_id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
-        transaction.execute(
-            "INSERT OR IGNORE INTO tags(id,name,color) VALUES (?1,?2,?3)",
-            params![tag_id, name, tag_color(index)],
-        )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO note_tags(note_id,tag_id) VALUES (?1,?2)",
-            params![input.id, tag_id],
-        )?;
+        transaction.execute("INSERT OR IGNORE INTO tags(id,name,color) VALUES(?1,?2,?3)", params![tag_id, name, tag_color(index)])?;
+        transaction.execute("INSERT OR IGNORE INTO note_tags(note_id,tag_id) VALUES(?1,?2)", params![id, tag_id])?;
     }
     transaction.commit()?;
-    drop(db);
-    get_note(state, input.id)
+    tags_for(&db, &id)
+}
+
+#[tauri::command]
+pub fn get_note_preferences(state: State<'_, AppState>, note_id: String) -> Result<NotePreferences, AppError> {
+    let db = lock_db(&state)?;
+    let stored: Option<(String, Option<String>)> = db.query_row(
+        "SELECT appearance_json,view_json FROM note_preferences WHERE note_id=?1", [&note_id],
+        |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+    let Some((appearance, view)) = stored else { return Ok(NotePreferences::default()); };
+    Ok(NotePreferences {
+        appearance: serde_json::from_str(&appearance)?,
+        view: view.map(|json| serde_json::from_str(&json)).transpose()?,
+    })
+}
+
+#[tauri::command]
+pub fn set_note_appearance(state: State<'_, AppState>, note_id: String, appearance: NoteAppearance) -> Result<NoteAppearance, AppError> {
+    appearance.validate()?;
+    let db = lock_db(&state)?;
+    db.execute("INSERT INTO note_preferences(note_id,appearance_json) VALUES(?1,?2)
+        ON CONFLICT(note_id) DO UPDATE SET appearance_json=excluded.appearance_json",
+        params![note_id, serde_json::to_string(&appearance)?])?;
+    Ok(appearance)
+}
+
+#[tauri::command]
+pub fn save_note_view_state(state: State<'_, AppState>, note_id: String, view: NoteViewState) -> Result<(), AppError> {
+    if !view.scroll_top.is_finite() || view.scroll_top < 0.0 { return Err(AppError::Invalid("阅读位置无效".into())); }
+    let db = lock_db(&state)?;
+    db.execute("INSERT INTO note_preferences(note_id,view_json) VALUES(?1,?2)
+        ON CONFLICT(note_id) DO UPDATE SET view_json=excluded.view_json",
+        params![note_id, serde_json::to_string(&view)?])?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -272,6 +296,7 @@ pub fn delete_note(app: tauri::AppHandle, state: State<'_, AppState>, id: String
     }
     remove_note_from_workspace(&db, &id)?;
     drop(db);
+    let _ = app.emit("qingjian://notes-changed", serde_json::json!({"noteIds":[id],"kind":"collection"}));
     crate::windows::hide_and_destroy_note_window(&app, &id);
     Ok(())
 }
@@ -384,6 +409,7 @@ pub fn permanently_delete_note(app: tauri::AppHandle, state: State<'_, AppState>
     }
     remove_note_from_workspace(&db, &id)?;
     drop(db);
+    let _ = app.emit("qingjian://notes-changed", serde_json::json!({"noteIds":[id],"kind":"collection"}));
     crate::windows::hide_and_destroy_note_window(&app, &id);
     Ok(())
 }
@@ -417,6 +443,7 @@ pub fn set_note_archived(
         return Err(AppError::Invalid("便签不存在".into()));
     }
     drop(db);
+    let _ = app.emit("qingjian://notes-changed", serde_json::json!({"noteIds":[id],"kind":"collection"}));
     if archived { crate::windows::hide_and_destroy_note_window(&app, &id); }
     Ok(())
 }
@@ -750,6 +777,9 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<AppSettings, AppError> {
+    if settings.default_task_marker_size != 0 && !(12..=36).contains(&settings.default_task_marker_size) {
+        return Err(AppError::Invalid("待办圆圈尺寸必须自动或在12到36之间".into()));
+    }
     if !(9..=72).contains(&settings.default_font_size) {
         return Err(AppError::Invalid("默认字号必须在 9 到 72 之间".into()));
     }
@@ -961,7 +991,7 @@ pub fn export_html(
         r#"<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>{}</title><style>
-body{{max-width:820px;margin:48px auto;padding:0 28px;color:#2c2b28;background:#fffefa;font:16px/1.7 "Microsoft YaHei UI",sans-serif}}
+body{{max-width:820px;margin:48px auto;padding:0 28px;color:#18181b;background:#fff;font:16px/1.55 "Microsoft YaHei UI",sans-serif}}
 body::after{{content:"";display:block;clear:both}}h1{{font-size:30px}}
 img{{display:block;max-width:100%;height:auto;border-radius:8px}}
 img:not([data-layout]),img[data-layout="block-center"]{{clear:both;margin:14px auto}}
@@ -970,8 +1000,13 @@ img[data-layout="block-right"]{{clear:both;margin:14px 0 14px auto}}
 img[data-layout="wrap-left"]{{float:left;clear:left;margin:7px 18px 10px 0}}
 img[data-layout="wrap-right"]{{float:right;clear:right;margin:7px 0 10px 18px}}
 h1,h2,h3,table,blockquote,pre{{clear:both}}
-table{{border-collapse:collapse;width:100%;margin:14px 0}}td,th{{border:1px solid #cfc8ba;padding:7px 9px;text-align:left}}th{{background:#f5f1e7}}
-blockquote{{margin-left:0;padding-left:14px;border-left:3px solid #f1d887;color:#736e65}}
+table{{border-collapse:collapse;width:100%;margin:14px 0}}td,th{{border:1px solid #e5e7eb;padding:7px 9px;text-align:left}}th{{background:#f7f8fa}}
+blockquote{{margin-left:0;padding-left:14px;border-left:3px solid #d1d5db;color:#6b7280}}
+ul[data-type="taskList"]{{list-style:none;padding-left:0}}
+li[data-type="taskItem"]{{display:flex;align-items:baseline;gap:9px}}
+li[data-type="taskItem"]>div{{min-width:0;flex:1}}li[data-type="taskItem"]>div>p:first-child{{margin-top:0}}
+li[data-checked="true"]>div>p:first-child{{color:#6b7280;text-decoration:line-through}}
+li[data-type="taskItem"] input{{accent-color:#52657d;flex:none}}
 @media print{{body{{margin:0;max-width:none}}}}
 </style></head><body>{}</body></html>"#,
         escape_html(&title),
@@ -1089,12 +1124,15 @@ pub async fn export_pdf(
     .map_err(|error| AppError::Other(format!("PDF 导出任务失败：{error}")))?
 }
 
-fn write_backup(state: &State<'_, AppState>, destination: &Path) -> Result<(), AppError> {
+fn write_backup(state: &AppState, destination: &Path) -> Result<(), AppError> {
+    // A standalone SQLite snapshot contains the current WAL state. The active
+    // database may continue changing after this lock is released.
+    let snapshot_dir = tempdir()?;
+    let database_path = snapshot_dir.path().join("qingjian.db");
     {
         let db = lock_db(state)?;
-        db.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+        db.execute("VACUUM INTO ?1", [database_path.to_string_lossy().as_ref()])?;
     }
-    let database_path = state.data_dir.join("qingjian.db");
     let mut files = BTreeMap::new();
     files.insert("qingjian.db".into(), hash_file(&database_path)?);
     let assets = WalkDir::new(&state.assets_dir)
@@ -1113,12 +1151,18 @@ fn write_backup(state: &State<'_, AppState>, destination: &Path) -> Result<(), A
     }
     let manifest = BackupManifest {
         format: "qingjian-backup".into(),
-        schema_version: 5,
+        schema_version: 6,
         app_version: env!("CARGO_PKG_VERSION").into(),
         created_at: Utc::now().to_rfc3339(),
         files,
     };
-    let file = File::create(destination)?;
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let temporary = NamedTempFile::new_in(parent)?;
+    let file = temporary.reopen()?;
     let mut zip = ZipWriter::new(file);
     let options = FileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -1136,7 +1180,100 @@ fn write_backup(state: &State<'_, AppState>, destination: &Path) -> Result<(), A
             std::io::copy(&mut asset, &mut zip)?;
         }
     }
-    zip.finish()?;
+    let completed = zip.finish()?;
+    completed.sync_all()?;
+    drop(completed);
+    let persisted = temporary
+        .persist(destination)
+        .map_err(|error| error.error)?;
+    persisted.sync_all()?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct StagedBackupAsset {
+    staged_path: PathBuf,
+    destination: PathBuf,
+    expected_hash: String,
+}
+
+fn stage_backup_assets<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    manifest: &BackupManifest,
+    staging_dir: &Path,
+    assets_dir: &Path,
+) -> Result<BTreeMap<String, StagedBackupAsset>, AppError> {
+    fs::create_dir_all(staging_dir)?;
+    let mut staged = BTreeMap::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let name = entry.name().to_owned();
+        if !name.starts_with("assets/") || entry.is_dir() {
+            continue;
+        }
+        let archive_path = Path::new(&name);
+        if archive_path.parent() != Some(Path::new("assets")) {
+            return Err(AppError::Invalid(format!("备份资源路径无效：{name}")));
+        }
+        let Some(file_name) = archive_path.file_name() else {
+            return Err(AppError::Invalid(format!("备份资源路径无效：{name}")));
+        };
+        let expected_hash = manifest
+            .files
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| AppError::Invalid(format!("备份资源缺少校验信息：{name}")))?;
+        let staged_path = staging_dir.join(file_name);
+        let mut output = File::create(&staged_path)?;
+        std::io::copy(&mut entry, &mut output)?;
+        output.sync_all()?;
+        if hash_file(&staged_path)? != expected_hash {
+            return Err(AppError::Invalid(format!("备份资源校验失败：{name}")));
+        }
+        let destination = assets_dir.join(file_name);
+        if destination.exists() && hash_file(&destination)? != expected_hash {
+            return Err(AppError::Invalid(format!("本地资源与备份冲突：{name}")));
+        }
+        if staged
+            .insert(
+                name.clone(),
+                StagedBackupAsset {
+                    staged_path,
+                    destination,
+                    expected_hash,
+                },
+            )
+            .is_some()
+        {
+            return Err(AppError::Invalid(format!("备份包含重复资源：{name}")));
+        }
+    }
+    Ok(staged)
+}
+
+fn install_staged_backup_assets(
+    staged: &BTreeMap<String, StagedBackupAsset>,
+    assets_dir: &Path,
+) -> Result<(), AppError> {
+    fs::create_dir_all(assets_dir)?;
+    for asset in staged.values() {
+        if asset.destination.exists() {
+            if hash_file(&asset.destination)? == asset.expected_hash {
+                continue;
+            }
+            return Err(AppError::Invalid(format!(
+                "本地资源与备份冲突：{}",
+                asset.destination.display(),
+            )));
+        }
+        let mut temporary = NamedTempFile::new_in(assets_dir)?;
+        let mut source = File::open(&asset.staged_path)?;
+        std::io::copy(&mut source, temporary.as_file_mut())?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist_noclobber(&asset.destination)
+            .map_err(|error| error.error)?;
+    }
     Ok(())
 }
 
@@ -1177,7 +1314,7 @@ pub fn restore_backup(
         entry.read_to_string(&mut json)?;
         serde_json::from_str(&json)?
     };
-    if manifest.format != "qingjian-backup" || manifest.schema_version > 5 {
+    if manifest.format != "qingjian-backup" || manifest.schema_version > 6 {
         return Err(AppError::Invalid("该备份版本不受当前轻笺支持".into()));
     }
     let incoming_path = temp.path().join("incoming.db");
@@ -1193,10 +1330,36 @@ pub fn restore_backup(
     }
     let incoming = Connection::open(&incoming_path)?;
     let version: u32 = incoming.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version > 5 {
+    if version > 6 {
         return Err(AppError::Invalid("备份数据库版本过新".into()));
     }
+    // Upgrade only the verified temporary database, never the source archive.
+    crate::state::migrate(&incoming)?;
+    let health: String = incoming.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if health != "ok" { return Err(AppError::Invalid("备份数据库健康检查失败".into())); }
+    if incoming.prepare("PRAGMA foreign_key_check")?.exists([])? {
+        return Err(AppError::Invalid("备份包含无效的数据关联，未导入任何便签".into()));
+    }
+    let required_assets = incoming
+        .prepare("SELECT asset_path FROM attachments")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<BTreeSet<_>, _>>()?;
     drop(incoming);
+
+    let staged_assets = stage_backup_assets(
+        &mut archive,
+        &manifest,
+        &temp.path().join("assets"),
+        &state.assets_dir,
+    )?;
+    for asset_path in &required_assets {
+        let archive_name = format!("assets/{asset_path}");
+        if !staged_assets.contains_key(&archive_name) {
+            return Err(AppError::Invalid(format!(
+                "备份缺少便签引用的资源：{archive_name}"
+            )));
+        }
+    }
 
     if replace {
         let safety = state
@@ -1206,124 +1369,62 @@ pub fn restore_backup(
         write_backup(&state, &safety)?;
     }
 
+    // Materialize fully validated assets before the database can reference them.
+    // A later database failure may leave an unreferenced content-addressed file,
+    // but it can never commit a note that points at a missing or corrupt asset.
+    install_staged_backup_assets(&staged_assets, &state.assets_dir)?;
+
     {
         let mut db = lock_db(&state)?;
-        db.execute("ATTACH DATABASE ?1 AS incoming", [incoming_path.to_string_lossy().as_ref()])?;
-        let tx = db.transaction()?;
-        if replace {
-            tx.execute_batch(
-                "DELETE FROM note_tags; DELETE FROM tags; DELETE FROM notes;
-                 DELETE FROM folders; DELETE FROM attachments; DELETE FROM settings;
-                 DELETE FROM workspace_state; DELETE FROM note_window_geometry;
-                 DELETE FROM note_window_state;",
-            )?;
-        }
-        let insert_mode = if replace { "OR REPLACE" } else { "OR IGNORE" };
-        if version >= 3 {
-            tx.execute_batch(&format!(
-                "INSERT {insert_mode} INTO folders(id,name,sort_order,created_at,updated_at)
-                    SELECT id,name,sort_order,created_at,updated_at FROM incoming.folders;
-                 INSERT {insert_mode} INTO notes(
-                    id,title,content_json,plain_text,created_at,updated_at,pinned,archived,
-                    folder_id,sort_order,trashed_at
-                 )
-                    SELECT id,title,content_json,plain_text,created_at,updated_at,pinned,archived,
-                           folder_id,sort_order,trashed_at FROM incoming.notes;"
-            ))?;
-        } else if version >= 2 {
-            tx.execute_batch(&format!(
-                "INSERT {insert_mode} INTO folders(id,name,sort_order,created_at,updated_at)
-                    SELECT id,name,sort_order,created_at,updated_at FROM incoming.folders;
-                 INSERT {insert_mode} INTO notes(
-                    id,title,content_json,plain_text,created_at,updated_at,pinned,archived,
-                    folder_id,sort_order,trashed_at
-                 )
-                    SELECT id,title,content_json,plain_text,created_at,updated_at,pinned,archived,
-                           folder_id,sort_order,NULL FROM incoming.notes;"
-            ))?;
-        } else {
-            tx.execute_batch(&format!(
-                "INSERT {insert_mode} INTO notes(
-                    id,title,content_json,plain_text,created_at,updated_at,pinned,archived,
-                    folder_id,sort_order,trashed_at
-                 )
-                    SELECT id,title,content_json,plain_text,created_at,updated_at,pinned,archived,
-                           NULL,rowid,NULL FROM incoming.notes;"
-            ))?;
-        }
-        tx.execute_batch(&format!(
-            "INSERT {insert_mode} INTO tags(id,name,color)
-                SELECT id,name,color FROM incoming.tags;
-             INSERT {insert_mode} INTO note_tags(note_id,tag_id)
-                SELECT note_id,tag_id FROM incoming.note_tags;
-             INSERT {insert_mode} INTO attachments(
-                id,sha256,asset_path,mime,width,height,size_bytes,created_at
-             )
-                SELECT id,sha256,asset_path,mime,width,height,size_bytes,created_at
-                FROM incoming.attachments;"
-        ))?;
-        if version >= 5 {
-            tx.execute_batch(&format!(
-                "INSERT {insert_mode} INTO note_window_state(
-                    note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
-                 ) SELECT note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
-                   FROM incoming.note_window_state;
-                 INSERT {insert_mode} INTO note_window_geometry(
-                    note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
-                    work_area_width,work_area_height,scale_factor
-                 ) SELECT note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
-                          work_area_width,work_area_height,scale_factor
-                   FROM incoming.note_window_geometry;"
-            ))?;
-        } else if version >= 4 {
-            tx.execute_batch(&format!(
-                "INSERT {insert_mode} INTO note_window_state(
-                    note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at
-                 ) SELECT note_id,mode,visible,always_on_top,opacity,100,locked,dock_edge,dock_offset,monitor_key,updated_at
-                   FROM incoming.note_window_state;
-                 INSERT {insert_mode} INTO note_window_geometry(
-                    note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
-                    work_area_width,work_area_height,scale_factor
-                 ) SELECT note_id,mode,x_ratio,y_ratio,width_dip,height_dip,work_area_x,work_area_y,
-                          work_area_width,work_area_height,scale_factor
-                   FROM incoming.note_window_geometry;"
-            ))?;
-        }
-        if replace {
-            tx.execute_batch("INSERT OR REPLACE INTO settings SELECT * FROM incoming.settings;")?;
-            if version >= 2 {
-                tx.execute_batch(
-                    "INSERT OR REPLACE INTO workspace_state
-                     SELECT * FROM incoming.workspace_state;",
-                )?;
-            }
-        }
-        tx.commit()?;
-        db.execute_batch("DETACH DATABASE incoming;")?;
-        crate::state::migrate_legacy_note_titles(&db)?;
+        merge_backup_database(&mut db, &incoming_path, replace)?;
     }
 
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index)?;
-        let name = entry.name().to_owned();
-        if !name.starts_with("assets/") || entry.is_dir() {
-            continue;
-        }
-        let Some(file_name) = Path::new(&name).file_name() else { continue };
-        let destination = state.assets_dir.join(file_name);
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        if let Some(expected) = manifest.files.get(&name) {
-            let actual = format!("{:x}", Sha256::digest(&bytes));
-            if &actual != expected {
-                return Err(AppError::Invalid(format!("备份资源校验失败：{name}")));
-            }
-        }
-        if !destination.exists() {
-            fs::write(destination, bytes)?;
-        }
-    }
     Ok(())
+}
+
+fn merge_backup_database(db: &mut Connection, incoming_path: &Path, replace: bool) -> Result<(), AppError> {
+    db.execute("ATTACH DATABASE ?1 AS incoming", [incoming_path.to_string_lossy().as_ref()])?;
+    let result = (|| -> Result<(), AppError> {
+        let tx = db.transaction()?;
+        if replace {
+            tx.execute_batch("DELETE FROM note_tags; DELETE FROM tags; DELETE FROM notes;
+                DELETE FROM folders; DELETE FROM attachments; DELETE FROM settings; DELETE FROM workspace_state;")?;
+        }
+        tx.execute_batch("CREATE TEMP TABLE restore_note_ids AS
+            SELECT id FROM incoming.notes WHERE id NOT IN (SELECT id FROM main.notes);
+            INSERT OR IGNORE INTO folders(id,name,sort_order,created_at,updated_at)
+                SELECT id,name,sort_order,created_at,updated_at FROM incoming.folders;
+            INSERT OR IGNORE INTO notes(id,title,content_json,plain_text,created_at,updated_at,pinned,archived,folder_id,sort_order,trashed_at)
+                SELECT n.id,n.title,n.content_json,n.plain_text,n.created_at,n.updated_at,n.pinned,n.archived,
+                    COALESCE((SELECT id FROM main.folders WHERE id=n.folder_id),
+                        (SELECT local.id FROM main.folders local JOIN incoming.folders f ON local.name=f.name COLLATE NOCASE WHERE f.id=n.folder_id)),
+                    n.sort_order,n.trashed_at FROM incoming.notes n;
+            INSERT OR IGNORE INTO tags(id,name,color) SELECT id,name,color FROM incoming.tags;
+            INSERT OR IGNORE INTO note_tags(note_id,tag_id)
+                SELECT nt.note_id,COALESCE((SELECT id FROM main.tags WHERE id=nt.tag_id),
+                    (SELECT id FROM main.tags WHERE name=t.name COLLATE NOCASE)) FROM incoming.note_tags nt
+                JOIN incoming.tags t ON t.id=nt.tag_id
+                WHERE nt.note_id IN (SELECT id FROM restore_note_ids);
+            INSERT OR IGNORE INTO attachments(id,sha256,asset_path,mime,width,height,size_bytes,created_at)
+                SELECT id,sha256,asset_path,mime,width,height,size_bytes,created_at FROM incoming.attachments;
+            INSERT OR IGNORE INTO note_window_state(note_id,mode,visible,always_on_top,opacity,text_opacity,locked,dock_edge,dock_offset,monitor_key,updated_at)
+                SELECT s.note_id,s.mode,0,s.always_on_top,s.opacity,s.text_opacity,s.locked,s.dock_edge,s.dock_offset,s.monitor_key,s.updated_at
+                FROM incoming.note_window_state s WHERE s.note_id IN (SELECT id FROM restore_note_ids);
+            INSERT OR IGNORE INTO note_window_geometry
+                SELECT s.* FROM incoming.note_window_geometry s WHERE s.note_id IN (SELECT id FROM restore_note_ids);
+            INSERT OR IGNORE INTO note_preferences
+                SELECT s.* FROM incoming.note_preferences s WHERE s.note_id IN (SELECT id FROM restore_note_ids);
+            DROP TABLE restore_note_ids;")?;
+        if replace {
+            tx.execute_batch("INSERT OR REPLACE INTO settings SELECT * FROM incoming.settings;
+                INSERT OR REPLACE INTO workspace_state SELECT * FROM incoming.workspace_state;")?;
+        }
+        tx.commit()?;
+        Ok(())
+    })();
+    // The transaction is dropped before DETACH, including every error path.
+    let detached = db.execute_batch("DETACH DATABASE incoming;").map_err(AppError::from);
+    result.and(detached)
 }
 
 #[tauri::command]
@@ -1334,6 +1435,125 @@ pub fn quit_app(app: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn insert_test_note(db: &Connection, id: &str, text: &str) {
+        db.execute("INSERT INTO notes(id,title,content_json,plain_text,created_at,updated_at,pinned,archived)
+            VALUES(?1,?2,'{\"type\":\"doc\"}',?2,'now','now',1,0)", params![id, text]).unwrap();
+    }
+
+    #[test]
+    fn content_save_keeps_metadata_and_refuses_archived_notes() {
+        let db = Connection::open_in_memory().unwrap();
+        crate::state::migrate(&db).unwrap();
+        insert_test_note(&db, "one", "old");
+        db.execute_batch("INSERT INTO tags VALUES('tag','保留标签','#888');
+            INSERT INTO note_tags VALUES('one','tag');").unwrap();
+        let input = SaveNoteInput { id: "one".into(), title: "ignored".into(),
+            content: serde_json::json!({"type":"doc"}), plain_text: "新正文".into() };
+        save_note_content(&db, &input).unwrap();
+        let pinned: bool = db.query_row("SELECT pinned FROM notes WHERE id='one'", [], |r| r.get(0)).unwrap();
+        assert!(pinned);
+        assert_eq!(tags_for(&db, "one").unwrap()[0].name, "保留标签");
+        db.execute("UPDATE notes SET archived=1 WHERE id='one'", []).unwrap();
+        assert!(save_note_content(&db, &input).is_err());
+    }
+
+    #[test]
+    fn backup_snapshot_includes_wal_and_stays_independent_of_later_writes() {
+        let dir = tempdir().unwrap();
+        let state = AppState::initialize(dir.path().join("data")).unwrap();
+        insert_test_note(&state.db.lock().unwrap(), "one", "快照内容");
+        let destination = dir.path().join("test.qingjian-backup");
+        write_backup(&state, &destination).unwrap();
+        state.db.lock().unwrap().execute("UPDATE notes SET plain_text='later'", []).unwrap();
+        let mut archive = ZipArchive::new(File::open(destination).unwrap()).unwrap();
+        let manifest: BackupManifest = serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+        let snapshot = dir.path().join("snapshot.db");
+        std::io::copy(&mut archive.by_name("qingjian.db").unwrap(), &mut File::create(&snapshot).unwrap()).unwrap();
+        assert_eq!(hash_file(&snapshot).unwrap(), manifest.files["qingjian.db"]);
+        let db = Connection::open(snapshot).unwrap();
+        let text: String = db.query_row("SELECT plain_text FROM notes WHERE id='one'", [], |r| r.get(0)).unwrap();
+        assert_eq!(text, "快照内容");
+        assert_eq!(manifest.schema_version, 6);
+    }
+
+    #[test]
+    fn progress_document_survives_save_snapshot_restore_and_retry() {
+        let dir = tempdir().unwrap();
+        let state = AppState::initialize(dir.path().join("data")).unwrap();
+        let document = serde_json::json!({"type":"doc","attrs":{"progressEnabled":true},"content":[
+            {"type":"taskList","content":[{"type":"taskItem","attrs":{"checked":true,"progressState":"blocked"},
+                "content":[{"type":"paragraph","content":[{"type":"text","text":"需求分析"}]}]}]}]});
+        {
+            let db = state.db.lock().unwrap();
+            insert_test_note(&db, "progress", "old");
+            let input = SaveNoteInput { id: "progress".into(), title: "ignored".into(), content: document.clone(), plain_text: "需求分析".into() };
+            db.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON notes BEGIN SELECT RAISE(ABORT,'模拟失败'); END;").unwrap();
+            assert!(save_note_content(&db, &input).is_err());
+            db.execute_batch("DROP TRIGGER fail_save;").unwrap();
+            save_note_content(&db, &input).unwrap();
+        }
+        let destination = dir.path().join("progress.qingjian-backup");
+        write_backup(&state, &destination).unwrap();
+        let mut archive = ZipArchive::new(File::open(destination).unwrap()).unwrap();
+        let snapshot = dir.path().join("progress.db");
+        std::io::copy(&mut archive.by_name("qingjian.db").unwrap(), &mut File::create(&snapshot).unwrap()).unwrap();
+        let mut restored = Connection::open_in_memory().unwrap();
+        crate::state::migrate(&restored).unwrap();
+        merge_backup_database(&mut restored, &snapshot, false).unwrap();
+        let (json, title, plain): (String, String, String) = restored.query_row(
+            "SELECT content_json,title,plain_text FROM notes WHERE id='progress'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap(), document);
+        assert_eq!(title, "需求分析");
+        assert_eq!(plain, "需求分析");
+    }
+
+    #[test]
+    fn backup_merge_maps_names_and_cleans_failed_attaches_before_retry() {
+        let dir = tempdir().unwrap();
+        let incoming_path = dir.path().join("incoming.db");
+        let incoming = Connection::open(&incoming_path).unwrap();
+        crate::state::migrate(&incoming).unwrap();
+        insert_test_note(&incoming, "new", "导入正文");
+        incoming.execute_batch("INSERT INTO tags VALUES('incoming-tag','共享','#888');
+            INSERT INTO folders VALUES('incoming-folder','工作',0,'now','now');
+            UPDATE notes SET folder_id='incoming-folder';
+            INSERT INTO note_tags VALUES('new','incoming-tag');
+            INSERT INTO note_window_state(note_id,mode,visible,updated_at) VALUES('new','card',1,'now');
+            INSERT INTO note_preferences(note_id,appearance_json) VALUES('new','{\"taskMarkerSize\":28}');").unwrap();
+        drop(incoming);
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::state::migrate(&db).unwrap();
+        db.execute_batch("INSERT INTO tags VALUES('local-tag','共享','#999');
+            INSERT INTO folders VALUES('local-folder','工作',0,'now','now');
+            CREATE TRIGGER fail_import BEFORE INSERT ON notes BEGIN SELECT RAISE(ABORT,'模拟恢复失败'); END;").unwrap();
+        assert!(merge_backup_database(&mut db, &incoming_path, false).is_err());
+        let attached: i64 = db.query_row("SELECT count(*) FROM pragma_database_list WHERE name='incoming'", [], |r| r.get(0)).unwrap();
+        assert_eq!(attached, 0);
+        db.execute_batch("DROP TRIGGER fail_import;").unwrap();
+        merge_backup_database(&mut db, &incoming_path, false).unwrap();
+        assert_eq!(tags_for(&db, "new").unwrap()[0].id, "local-tag");
+        let folder: String = db.query_row("SELECT folder_id FROM notes WHERE id='new'", [], |r| r.get(0)).unwrap();
+        assert_eq!(folder, "local-folder");
+        let visible: bool = db.query_row("SELECT visible FROM note_window_state WHERE note_id='new'", [], |r| r.get(0)).unwrap();
+        assert!(!visible, "imported notes have no live window and must not claim desktop visibility");
+        // Reimporting cannot append stale tags or replace an existing note.
+        db.execute_batch("DELETE FROM note_tags; UPDATE notes SET plain_text='local edit';").unwrap();
+        merge_backup_database(&mut db, &incoming_path, false).unwrap();
+        assert!(tags_for(&db, "new").unwrap().is_empty());
+        let text: String = db.query_row("SELECT plain_text FROM notes WHERE id='new'", [], |r| r.get(0)).unwrap();
+        assert_eq!(text, "local edit");
+    }
+
+    fn archive_with_asset(name: &str, bytes: &[u8]) -> ZipArchive<Cursor<Vec<u8>>> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        writer.start_file(name, FileOptions::default()).unwrap();
+        writer.write_all(bytes).unwrap();
+        let mut cursor = writer.finish().unwrap();
+        cursor.set_position(0);
+        ZipArchive::new(cursor).unwrap()
+    }
 
     #[test]
     fn html_escape_handles_unsafe_characters() {
@@ -1408,5 +1628,46 @@ mod tests {
             "SELECT trashed_at FROM notes WHERE id=?1", [&first], |row| row.get(0),
         ).unwrap();
         assert_eq!(trashed_at, None);
+    }
+
+    #[test]
+    fn backup_assets_are_validated_before_installation() {
+        let temp = tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let assets = temp.path().join("assets");
+        let bytes = b"valid image bytes";
+        let name = "assets/example.png";
+        let mut archive = archive_with_asset(name, bytes);
+        let manifest = BackupManifest {
+            format: "qingjian-backup".into(),
+            schema_version: 6,
+            app_version: "0.7.0".into(),
+            created_at: "now".into(),
+            files: BTreeMap::from([(name.into(), format!("{:x}", Sha256::digest(bytes)))]),
+        };
+
+        let staged = stage_backup_assets(&mut archive, &manifest, &staging, &assets).unwrap();
+        install_staged_backup_assets(&staged, &assets).unwrap();
+
+        assert_eq!(fs::read(assets.join("example.png")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn corrupt_backup_asset_never_reaches_the_assets_directory() {
+        let temp = tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let assets = temp.path().join("assets");
+        let name = "assets/example.png";
+        let mut archive = archive_with_asset(name, b"corrupt");
+        let manifest = BackupManifest {
+            format: "qingjian-backup".into(),
+            schema_version: 6,
+            app_version: "0.7.0".into(),
+            created_at: "now".into(),
+            files: BTreeMap::from([(name.into(), "not-the-real-hash".into())]),
+        };
+
+        assert!(stage_backup_assets(&mut archive, &manifest, &staging, &assets).is_err());
+        assert!(!assets.exists());
     }
 }

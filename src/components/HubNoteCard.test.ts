@@ -28,7 +28,6 @@ const folders: Folder[] = [{
 function renderCard(overrides: Record<string, unknown> = {}) {
   const callbacks = {
     onActivate: vi.fn(),
-    onToggleSelection: vi.fn(),
     onTogglePin: vi.fn(),
     onOpenMenu: vi.fn(),
     onContextMenu: vi.fn(),
@@ -69,11 +68,14 @@ describe('HubNoteCard', () => {
   })
 
   it('supports keyboard activation and discoverable card actions', async () => {
-    const { container, callbacks } = renderCard()
-    const card = container.querySelector('.workbench-note-card') as HTMLElement
+    const { callbacks } = renderCard()
+    const main = screen.getByRole('button', { name: '打开 首页改版计划' })
+    const pin = screen.getByRole('button', { name: '列表置顶' })
 
-    await fireEvent.keyDown(card, { key: 'Enter' })
-    await fireEvent.click(screen.getByLabelText('置顶便签'))
+    await fireEvent.keyDown(pin, { key: 'Enter' })
+    expect(callbacks.onActivate).not.toHaveBeenCalled()
+    await fireEvent.keyDown(main, { key: 'Enter' })
+    await fireEvent.click(pin)
     await fireEvent.click(screen.getByLabelText('更多操作'))
 
     expect(callbacks.onActivate).toHaveBeenCalledWith(note)
@@ -84,9 +86,16 @@ describe('HubNoteCard', () => {
   it('exposes selection state without opening the note', async () => {
     const { callbacks } = renderCard({ selectionMode: true, selected: true })
 
-    await fireEvent.click(screen.getByLabelText('取消选择 首页改版计划'))
+    const selection = screen.getByRole('button', { name: '取消选择 首页改版计划' })
+    expect(selection).toHaveAttribute('aria-pressed', 'true')
+    await fireEvent.click(selection)
 
-    expect(callbacks.onToggleSelection).toHaveBeenCalledWith(note)
-    expect(callbacks.onActivate).not.toHaveBeenCalled()
+    expect(callbacks.onActivate).toHaveBeenCalledWith(note)
+  })
+
+  it('allows clicking the visible selection marker', async () => {
+    const { callbacks } = renderCard({ selectionMode: true, selected: false })
+    await fireEvent.click(screen.getByRole('button', { name: '勾选 首页改版计划' }))
+    expect(callbacks.onActivate).toHaveBeenCalledOnce()
   })
 })

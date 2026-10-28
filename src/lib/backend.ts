@@ -7,11 +7,15 @@ import type {
   NoteSummary,
   NoteWindowMode,
   NoteWindowState,
+  NoteAppearance,
+  NotePreferences,
+  NoteViewState,
   SaveNoteInput,
   WorkspaceState,
 } from './types'
 import { DEFAULT_SETTINGS, EMPTY_DOCUMENT, normalizeHotkeyAction } from './types'
 import { normalizeThemeId } from './theme'
+import { INHERITED_APPEARANCE } from './appearance'
 
 const inTauri = '__TAURI_INTERNALS__' in window
 if (!inTauri && !import.meta.env.DEV) {
@@ -22,6 +26,11 @@ const MOCK_SETTINGS_KEY = 'qingjian.mock.settings'
 
 function now() {
   return new Date().toISOString()
+}
+
+function documentText(node: Record<string, unknown>): string {
+  const children = Array.isArray(node.content) ? node.content as Record<string, unknown>[] : []
+  return `${typeof node.text === 'string' ? node.text : ''}${children.map(documentText).join(['paragraph', 'heading', 'text'].includes(String(node.type)) ? '' : '\n')}`
 }
 
 function newMockNote(): Note {
@@ -88,7 +97,7 @@ export const backend = {
       .filter((note) =>
         !q ||
         note.title.toLocaleLowerCase().includes(q) ||
-        note.preview.toLocaleLowerCase().includes(q) ||
+        documentText(note.content).toLocaleLowerCase().includes(q) ||
         note.tags.some((tag) => tag.name.toLocaleLowerCase().includes(q)),
       )
       .sort((a, b) =>
@@ -119,20 +128,62 @@ export const backend = {
     const notes = readMockNotes()
     const index = notes.findIndex((note) => note.id === input.id)
     if (index < 0) throw new Error('便签不存在')
+    if (notes[index].trashedAt || notes[index].archived) throw new Error('便签已收起，未覆盖其内容')
     const saved: Note = {
       ...notes[index],
-      ...input,
+      title: input.title,
+      content: input.content,
       preview: input.plainText.trim().slice(0, 160),
       updatedAt: now(),
-      tags: input.tags.map((name) => ({
-        id: name,
-        name,
-        color: '#E5B83B',
-      })),
     }
     notes[index] = saved
     writeMockNotes(notes)
     return saved
+  },
+
+  async setNoteTags(id: string, names: string[]) {
+    if (inTauri) return invoke<Note['tags']>('set_note_tags', { id, names })
+    const tags = [...new Set(names.map(name => name.trim()).filter(Boolean))].slice(0, 12)
+      .map(name => ({ id: name.toLocaleLowerCase(), name, color: '#6b7280' }))
+    writeMockNotes(readMockNotes().map(note => note.id === id ? { ...note, tags } : note))
+    return tags
+  },
+
+  async getNotePreferences(noteId: string): Promise<NotePreferences> {
+    if (inTauri) return invoke('get_note_preferences', { noteId })
+    return JSON.parse(localStorage.getItem(`qingjian.mock.preferences.${noteId}`) || 'null')
+      ?? { appearance: { ...INHERITED_APPEARANCE }, view: null }
+  },
+
+  async setNoteAppearance(noteId: string, appearance: NoteAppearance): Promise<NoteAppearance> {
+    if (inTauri) return invoke('set_note_appearance', { noteId, appearance })
+    const current = await this.getNotePreferences(noteId)
+    localStorage.setItem(`qingjian.mock.preferences.${noteId}`, JSON.stringify({ ...current, appearance }))
+    return appearance
+  },
+
+  async saveNoteViewState(noteId: string, view: NoteViewState): Promise<void> {
+    if (inTauri) return invoke('save_note_view_state', { noteId, view })
+    const current = await this.getNotePreferences(noteId)
+    localStorage.setItem(`qingjian.mock.preferences.${noteId}`, JSON.stringify({ ...current, view }))
+  },
+
+  async listLiveNoteIds(): Promise<string[]> {
+    if (inTauri) return invoke('list_live_note_ids')
+    return [] // Browser previews are independent of native editing sessions.
+  },
+
+  async beginNoteOperation(operationId: string): Promise<void> {
+    if (inTauri) await invoke('begin_note_operation', { operationId })
+  },
+
+  async endNoteOperation(operationId: string): Promise<void> {
+    if (inTauri) await invoke('end_note_operation', { operationId })
+  },
+
+  async releaseIdleNoteWindow(noteId: string): Promise<boolean> {
+    if (inTauri) return invoke('release_idle_note_window', { noteId })
+    return false
   },
 
   async deleteNote(id: string): Promise<void> {
@@ -294,8 +345,16 @@ export const backend = {
     return settings
   },
 
-  async openNoteWindow(noteId: string, preferredMode?: NoteWindowMode): Promise<NoteWindowState | null> {
-    if (inTauri) return invoke('open_note_window', { noteId, preferredMode: preferredMode ?? null })
+  async openNoteWindow(noteId: string, preferredMode?: NoteWindowMode, sourceNoteId?: string): Promise<NoteWindowState | null> {
+    if (inTauri) {
+      for (let attempt = 0; ; attempt++) {
+          try { return await invoke('open_note_window', { noteId, preferredMode: preferredMode ?? null, sourceNoteId: sourceNoteId ?? null }) }
+        catch (error) {
+          if (attempt >= 19 || !String(error).includes('正在回收')) throw error
+          await new Promise(resolve => setTimeout(resolve, 30))
+        }
+      }
+    }
     const state: NoteWindowState = {
       noteId, mode: preferredMode ?? 'card', visible: true,
       alwaysOnTop: DEFAULT_SETTINGS.defaultNoteAlwaysOnTop,

@@ -74,6 +74,27 @@ export interface Note extends NoteSummary {
   content: Record<string, unknown>
 }
 
+// null inherits the global default; zero means automatic task marker sizing.
+export interface NoteAppearance {
+  fontFamily: string | null
+  fontSize: number | null
+  lineHeight: number | null
+  taskMarkerSize: number | null
+}
+export interface NoteViewState {
+  anchor: number
+  head: number
+  scrollTop: number
+}
+export interface NotePreferences {
+  appearance: NoteAppearance
+  view: NoteViewState | null
+}
+export type NoteChange = {
+  noteIds: string[]
+  kind: 'content' | 'metadata' | 'collection' | 'appearance'
+}
+
 export interface AppSettings {
   hotkey: string
   startOnBoot: boolean
@@ -81,6 +102,7 @@ export interface AppSettings {
   defaultFontFamily: string
   defaultFontSize: number
   defaultLineHeight: number
+  defaultTaskMarkerSize: number
   capsuleDisplay: CapsuleDisplay
   autoHideAtScreenEdge: boolean
   sidebarCollapsed: boolean
@@ -109,9 +131,6 @@ export interface SaveNoteInput {
   title: string
   content: Record<string, unknown>
   plainText: string
-  pinned: boolean
-  archived: boolean
-  tags: string[]
 }
 
 export function normalizeHotkeyAction(value: unknown): HotkeyAction {
@@ -132,6 +151,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultFontFamily: 'Microsoft YaHei UI',
   defaultFontSize: 16,
   defaultLineHeight: 1.55,
+  defaultTaskMarkerSize: 0,
   capsuleDisplay: 'comfortable',
   autoHideAtScreenEdge: true,
   sidebarCollapsed: false,

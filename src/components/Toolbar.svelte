@@ -7,11 +7,13 @@
     Trash2, Minus, Plus, Image as ImageIcon, RotateCcw, WrapText, MoreHorizontal,
   } from 'lucide-svelte'
   import { normalizeImageLayout, type ImageLayout } from '../lib/editor'
+  import { popover } from '../lib/menu'
   import { tooltip } from '../lib/tooltip'
 
   export let editor: Editor | undefined
   export let fonts: string[] = []
   export let version = 0
+  export let defaultFontSize = 16
   export let onPickImage: () => void
   export let menuOpen = false
   export let onMenuOpenChange: (open: boolean) => void = () => undefined
@@ -22,12 +24,13 @@
     'SimSun', 'SimHei', 'KaiTi', 'Segoe UI Variable', 'Arial', 'Consolas',
   ]
   let rememberedSelection: { from: number; to: number } | null = null
+  let moreButton: HTMLButtonElement
   $: currentFont = version >= 0
     ? editor?.getAttributes('textStyle').fontFamily || ''
     : ''
   $: currentSize = version >= 0
-    ? Number.parseInt(editor?.getAttributes('textStyle').fontSize || '16', 10)
-    : 16
+    ? Number.parseInt(editor?.getAttributes('textStyle').fontSize || String(defaultFontSize), 10)
+    : defaultFontSize
   $: blockStyle = version >= 0
     ? editor?.isActive('heading', { level: 1 }) ? 'h1'
       : editor?.isActive('heading', { level: 2 }) ? 'h2'
@@ -201,9 +204,9 @@
     <button class:active={editor?.isActive('taskList')} aria-label="圆圈待办" use:tooltip={'圆圈待办 · 点击圆圈即可完成'} on:click={() => command(() => editor?.chain().focus().toggleTaskList().run())}><CircleCheckBig /></button>
     <button class:active={editor?.isActive('bulletList')} aria-label="项目符号" use:tooltip={'项目符号'} on:click={() => command(() => editor?.chain().focus().toggleBulletList().run())}><List /></button>
     <div class="format-more-anchor" data-transient-root>
-      <button class:active={menuOpen} aria-label="更多格式" use:tooltip={'更多格式'} on:mousedown|preventDefault={rememberTextSelection} on:click={toggleMore}><MoreHorizontal /></button>
+      <button bind:this={moreButton} class:active={menuOpen} aria-label="更多格式" aria-haspopup="dialog" aria-expanded={menuOpen} use:tooltip={'更多格式'} on:mousedown|preventDefault={rememberTextSelection} on:click={toggleMore}><MoreHorizontal /></button>
       {#if menuOpen}
-        <div class="format-more-menu" role="menu" aria-label="更多格式">
+        <div class="format-more-menu" role="dialog" aria-label="更多格式" use:popover={{ onClose: () => onMenuOpenChange(false), returnFocus: moreButton }}>
           <section class="advanced-format-controls">
             <small>段落与字体</small>
             <div>
