@@ -26,6 +26,7 @@ if (-not (Test-Path -LiteralPath $cargo)) {
 }
 
 Invoke-Checked 'npm.cmd' @('run','quality:release')
+Invoke-Checked 'python' @('scripts/update-installer-template.py','--check')
 
 $oldSigningKey = $env:TAURI_SIGNING_PRIVATE_KEY
 $oldSigningPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
